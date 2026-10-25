@@ -2159,8 +2159,8 @@ function syncFileName(){ return `pocket-budget-backup-${slug(curProfile().name)}
 /* ============ Sync: Sign in with Google → a hidden app folder in the person's OWN Google Drive ============
    Uses the drive.appdata permission only: the app can see its own file and nothing else in your Drive,
    and nobody else (including whoever made the app) can see it. No server: the phone talks to Google directly. */
-const APP_VERSION='v1';
-const GOOGLE_CLIENT_ID = '';   // OAuth client (type: Web application) whose authorised origin + redirect is this page
+const APP_VERSION='v2';
+const GOOGLE_CLIENT_ID = '1012295719275-2nhecb6mkicb2bqt0dmmuj6t09aojkjd.apps.googleusercontent.com';   // OAuth client (type: Web application) whose authorised origin + redirect is this page
 const G_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const G_API='https://www.googleapis.com/drive/v3', G_UP='https://www.googleapis.com/upload/drive/v3';
 const GSTATE='pocketBudget.gstate', GSILENT='pocketBudget.gsilent';
