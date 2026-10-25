@@ -364,6 +364,7 @@ input.in.wbud{width:112px;flex:none;text-align:right}
 .gbtn{display:inline-flex;align-items:center;justify-content:center;gap:10px;width:100%;max-width:340px;padding:11px 16px;border-radius:999px;border:1px solid #dadce0;background:#fff;color:#1f1f1f;font:500 15px/1.2 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;cursor:pointer}
 .gbtn svg{width:20px;height:20px;flex:none}.gbtn:active{background:#f1f3f4}
 .btns .gbtn{width:auto;flex:1}
+.savewarn{position:fixed;left:12px;right:12px;top:calc(8px + env(safe-area-inset-top));z-index:80;background:var(--bad);color:#fff;padding:10px 12px;border-radius:12px;font-size:13.5px;box-shadow:var(--shadow)}
 </style>
 </head>
 <body>
@@ -404,6 +405,7 @@ input.in.wbud{width:112px;flex:none;text-align:right}
 <input type="file" id="fileIn" accept=".json,application/json" class="hidden">
 
 <script>
+if(window.top!==window.self){ document.documentElement.style.display="none"; try{ window.top.location=window.self.location.href; }catch(e){} }   // never run inside someone else's frame
 "use strict";
 /* ============ Constants ============ */
 /* Categories are the user's own (Settings → Categories), stored in DB.settings.cats and synced.
@@ -438,7 +440,7 @@ const SYS_CATS = [
   {id:'lent', name:'Lent to friends', icon:'🤝', friend:true, sys:true},
   {id:'repaid', name:'Paid back by friend', icon:'💵', income:true, friend:true, sys:true},
   {id:'borrowed', name:'Borrowed from friend', icon:'🙏', friend:true, owe:true, track:true, sys:true},   // just a reminder: not spending
-  {id:'payback', name:'Paid back to friend', icon:'📤', friend:true, owe:true, sys:true},                 // counts as spending
+  {id:'payback', name:'Paid back to friend', icon:'📤', friend:true, owe:true, track:true, sys:true},     // repaying a loan: not spending (what the money bought already counted)
   {id:'xfer', name:'Transfer / top-up', icon:'🔁', track:true, sys:true},   // moves money between accounts: never spending
   {id:'refund', name:'Refunds', icon:'↩️', income:true, reason:true, sys:true},   // standalone: not linked to any category
 ];
@@ -448,11 +450,13 @@ let CATS=[], CAT={}, EXP_CATS=[], BUDGET_CATS=[], FIXED=new Set(), LIVING_EXCL=n
 const FIXED_TXT = 'bills &amp; one-offs';
 function okCat(c){ return c && typeof c==='object' && typeof c.id==='string' && /^[a-z0-9_-]{1,40}$/.test(c.id) && !SYS_IDS.has(c.id) && typeof c.name==='string'; }
 function userCats(){ const c=(typeof DB!=='undefined' && DB && DB.settings && Array.isArray(DB.settings.cats))? DB.settings.cats.filter(okCat) : null;
-  return (c && c.length? c : DEFAULT_CATS).map(x=>({...x, kind: CAT_KINDS[x.kind]? x.kind : 'living', name:String(x.name).slice(0,40), icon:String(x.icon||'•').slice(0,8),
-    subs: Array.isArray(x.subs) && x.subs.length? x.subs.filter(t=>t && typeof t.id==='string' && typeof t.name==='string').map(t=>({id:t.id, name:String(t.name).slice(0,30), icon:String(t.icon||'•').slice(0,8)})) : undefined})); }
+  return (c!==null? c : DEFAULT_CATS).map(x=>({id:x.id, hidden:x.hidden===true||undefined, reason:x.reason===true||undefined, send:x.send===true||undefined, kind: CAT_KINDS[x.kind]? x.kind : 'living', name:String(x.name).slice(0,40), icon:String(x.icon||'•').slice(0,8),
+    subs: Array.isArray(x.subs) && x.subs.length? x.subs.filter(t=>t && typeof t.id==='string' && /^[A-Za-z0-9_-]{1,40}$/.test(t.id) && typeof t.name==='string').map(t=>({id:t.id, name:String(t.name).slice(0,30), icon:String(t.icon||'•').slice(0,8)})) : undefined})); }
 /* Rebuilds the category lists. Called after loading data, syncing, switching profile and editing categories. */
 function buildCats(){
-  CATS = [...userCats(), ...SYS_CATS];
+  const known=new Set([...userCats().map(c=>c.id), ...SYS_IDS]), ghosts=[];
+  if(typeof DB!=='undefined' && DB && DB.entries) for(const e of Object.values(DB.entries)) if(!e.del && !known.has(e.cat)){ known.add(e.cat); ghosts.push({id:e.cat, name:'Other ('+e.cat+')', icon:'❓', kind:'living', hidden:true, ghost:true}); }
+  CATS = [...userCats(), ...ghosts, ...SYS_CATS];
   CAT = Object.fromEntries(CATS.map(c=>[c.id,c]));
   EXP_CATS = CATS.filter(c=>!c.income && !c.track);                 // hidden categories still count, so old spending never disappears
   BUDGET_CATS = EXP_CATS.filter(c=>!c.friend && !c.hidden);         // money lent to friends has no budget row
@@ -460,6 +464,10 @@ function buildCats(){
   LIVING_EXCL = new Set([...CATS.filter(c=>!c.sys && c.kind!=='living').map(c=>c.id), 'lent','repaid','payback','borrowed','refund']);
 }
 const isSendCat = id => !!(CAT[id] && CAT[id].send);
+/* An amount sent home, in the home currency (null when it can't be known: no rate saved, or a different home currency) */
+function homeAmt(e){ if(homeCode()===curCode()) return e.amt;
+  if((e.homeCur||'')!==homeCode()) return null;
+  if(typeof e.inr==='number' && e.inr>0) return e.inr; if(typeof e.rate==='number' && e.rate>0) return e.amt*e.rate; return null; }
 const subOf = e => { const k=CAT[e.cat]; return e.sub && k && k.subs ? k.subs.find(x=>x.id===e.sub) || null : null; };
 const KEY_BASE = 'pocketBudget.v1';
 const PKEY = 'pocketBudget.profiles';
@@ -472,7 +480,7 @@ function loadProfiles(){
   return P;
 }
 let PROFILES = loadProfiles();
-function saveProfiles(){ try{ localStorage.setItem(PKEY, JSON.stringify(PROFILES)); }catch(e){} }
+function saveProfiles(){ try{ const P=loadProfiles(); for(const p of PROFILES.list){ const o=P.list.find(x=>x.id===p.id); if(o && o.syncName && !p.syncName) p.syncName=o.syncName; } localStorage.setItem(PKEY, JSON.stringify(PROFILES)); }catch(e){} }
 function curProfile(){ return PROFILES.list.find(p=>p.id===PROFILES.current) || PROFILES.list[0]; }
 function keyFor(id){ return id==='default' ? KEY_BASE : KEY_BASE+'.'+id; }
 function syncKeyFor(id){ return id==='default' ? 'syncHandle' : 'syncHandle:'+id; }
@@ -481,12 +489,31 @@ let KEY = keyFor(PROFILES.current);
 /* ============ Storage ============ */
 function blankDB(){ return {entries:{}, months:{}, rates:{}, settings:{upd:0, theme:'auto'}, meta:{}}; }
 function loadDB(){
-  try{ const raw = localStorage.getItem(KEY); if(raw){ const d = JSON.parse(raw); return Object.assign(blankDB(), d); } }catch(e){}
+  try{ const raw = localStorage.getItem(KEY); if(raw){ const d = JSON.parse(raw); const db=blankDB();
+    if(d && typeof d==='object'){
+      for(const [id,e] of Object.entries(d.entries||{})){ const c=cleanEntry(id,e); if(c) db.entries[id]=c; }
+      for(const [m,c] of Object.entries(d.months||{})){ if(/^\d{4}-\d{2}$/.test(m)){ const v=cleanMonth(c); if(v) db.months[m]=v; } }
+      for(const [k,v] of Object.entries(d.rates||{})) if(/^\d{4}-\d{2}-\d{2}\|[A-Z]{6}$/.test(k) && typeof v==='number') db.rates[k]=v;
+      db.settings=cleanSettings(d.settings)||db.settings;
+      if(d.meta && typeof d.meta==='object') for(const k of ['lastCloud','lastManual','lastRate','lastRatePair']) if(['number','string'].includes(typeof d.meta[k])) db.meta[k]=d.meta[k];
+      const lc=+localStorage.getItem(KEY+'.lastCloud')||0; if(lc>(db.meta.lastCloud||0)) db.meta.lastCloud=lc;
+    }
+    return db; } }catch(e){}
   return blankDB();
 }
 let DB = loadDB(); buildCats();
-function persist(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){ toast('Could not save on this device: '+e.message); } }
+/* Results of the expensive scans (accounts, monthly totals, balances) are remembered until data changes or the next render */
+const MEMO=new Map();
+function bump(){ MEMO.clear(); }
+function memo(key, fn){ if(MEMO.has(key)) return MEMO.get(key); const v=fn(); MEMO.set(key, v); return v; }
+let saveFailed=false;
+function persist(){ bump(); try{ localStorage.setItem(KEY, JSON.stringify(DB)); if(saveFailed){ saveFailed=false; const b=document.getElementById('saveWarn'); if(b) b.remove(); } }
+  catch(e){ saveFailed=true; if(!document.getElementById('saveWarn')){ const b=document.createElement('div'); b.id='saveWarn'; b.className='savewarn';
+    b.textContent='⚠ This phone’s storage for Pocket Budget is full, so new changes may be lost when the app closes. '+(cloudOn()? 'They are still being saved to your Google Drive.' : 'Sign in with Google (Settings → Sync) or save a backup file now.');
+    document.body.appendChild(b); } } }
 function save(){ persist(); scheduleSync(); }
+function rndHex(n){ const a=new Uint8Array(n); crypto.getRandomValues(a); return [...a].map(b=>b.toString(16).padStart(2,'0')).join(''); }
+function tomb(e){ return {id:e.id, date:e.date, cat:e.cat, amt:0, del:true, upd:Date.now(), cr:e.cr||0}; }   // a deleted entry keeps only what sync needs
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
 /* ============ Dates & money ============ */
@@ -515,7 +542,8 @@ const CURRENCIES = {
 };
 function curInfo(c){ return CURRENCIES[c] || {sym:c+' ',name:c}; }
 function money(n, c, dec){ const i=curInfo(c); const d = dec===undefined ? (i.dec??2) : Math.min(dec, i.dec??2);
-  return (n<0?'−':'')+i.sym+Math.abs(d===0?Math.round(n||0):(n||0)).toLocaleString(i.loc||'en-US',{minimumFractionDigits:d,maximumFractionDigits:d}); }
+  const f=Math.pow(10,d), v=Math.round((+n||0)*f)/f;
+  return (v<0?'−':'')+i.sym+Math.abs(v).toLocaleString(i.loc||'en-US',{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function curCode(){ return (typeof curProfile==='function' && curProfile().currency) || 'SGD'; }
 function homeCode(){ return (typeof curProfile==='function' && curProfile().homeCur) || curCode(); }   // no home currency = same as expense currency
 const sgd  = n => money(n, curCode());        // amount in this profile's currency
@@ -523,12 +551,14 @@ const sgd0 = n => money(n, curCode(), 0);     // same, rounded
 const inr  = (n, c) => money(n, c || homeCode(), 0);   // amount in the home currency
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const r2 = n => Math.round(n*100)/100;
+const jsa = v => esc(JSON.stringify(String(v)));   // a value as a safe JS string inside an onclick="..." attribute
 
 /* ============ Month config (salary + budgets) ============ */
 function cfg(ym){
-  if(DB.months[ym] && !DB.months[ym].del) return {...DB.months[ym], inherited:false};
-  const prev = Object.keys(DB.months).filter(k=>k<ym && !DB.months[k].del).sort().pop();
-  if(prev) return {...DB.months[prev], fundsIn:[], fundsAmt:{}, inherited:prev};
+  const fix = m => ({...m, salary:+m.salary||0, budgets: m.budgets && typeof m.budgets==='object' && !Array.isArray(m.budgets)? m.budgets : {}});
+  if(DB.months[ym] && !DB.months[ym].del) return {...fix(DB.months[ym]), inherited:false};
+  const prev = Object.keys(DB.months).filter(k=>k<ym && DB.months[k] && !DB.months[k].del).sort().pop();
+  if(prev) return {...fix(DB.months[prev]), fundsIn:[], fundsAmt:{}, inherited:prev};
   return {salary:0, budgets:{}, inherited:null};
 }
 
@@ -553,7 +583,8 @@ function layoutMigrate(){ return false; }
 const isEF = (f, ym) => !isCredit(f) && !useSet(typeof ym==='string'? ym : undefined).has(f.id);
 const isSpend = (f, ym) => !isCredit(f) && !isEF(f, ym);
 // Visible accounts. Removed ones are hidden; a duplicate with the same name (e.g. two EZ-Link cards) is left out if it has no balance or payments.
-function funds(){
+function funds(){ return memo('funds', fundsRaw); }
+function fundsRaw(){
   const list=allFunds().filter(f=>!f.hidden), used=new Set();
   for(const e of Object.values(DB.entries)){ if(e.del) continue; if(e.pay) used.add(e.pay); if(e.from) used.add(e.from); if(e.to) used.add(e.to); }
   const data=f=>(+f.amt||0)!==0 || !!f.at || used.has(f.id), groups={}, drop=new Set();
@@ -579,7 +610,8 @@ const PAYKEY='pocketBudget.lastPay';
 function fundName(id){ const f=allFunds().find(x=>x.id===id); return f? f.name : ''; }
 function lastPay(){ try{ const v=localStorage.getItem(PAYKEY)||''; return funds().some(f=>f.id===v)? v : ''; }catch(e){ return ''; } }
 function setLastPay(v){ try{ if(v) localStorage.setItem(PAYKEY,v); }catch(e){} }
-function acctTx(id){
+function acctTx(id){ return memo('tx:'+id, ()=>acctTxRaw(id)); }
+function acctTxRaw(id){
   const f=funds().find(x=>x.id===id), at=f?.at||0, out=[];
   for(const e of Object.values(DB.entries)){ if(e.del) continue; let d=0;
     if(e.cat==='xfer'){ if(e.to===id) d+=e.amt; if(e.from===id) d-=e.amt; }
@@ -612,7 +644,7 @@ function balancesCard(){
 function accountsStrip(){
   const all=funds(), fs=all.filter(f=>isSpend(f)), efs=all.filter(f=>isEF(f)), used=fs.filter(f=>(+f.amt||0)||f.at||acctTx(f.id).length), tot=used.reduce((a,f)=>a+liveBal(f),0), efTot=efs.reduce((a,f)=>a+liveBal(f),0);
   return `<div class="card" data-bal="1"><h2 class="row" style="justify-content:space-between;margin-bottom:10px"><span>Spending accounts <span class="muted num" style="font-weight:600;font-size:14px">${used.length? bal(tot):''}</span></span><span class="row" style="gap:6px">${eyeBtn('hEye')}<button class="lnk" style="float:none" onclick="balancesSheet({})">Manage</button></span></h2>
-    <div class="acc">${(used.length?used:fs).map(f=>`<button class="ac" data-acct="${esc(f.id)}" onclick="accountSheet('${esc(f.id)}')"><div class="ai">${esc(f.icon||'💰')}</div><div class="an">${esc(shortName(f))}</div><div class="av2 num">${(+f.amt||0)||f.at||acctTx(f.id).length? bal(liveBal(f)) : '<span class="muted" style="font-size:13px;font-weight:600">Set balance</span>'}</div></button>`).join('')}
+    <div class="acc">${(used.length?used:fs).map(f=>`<button class="ac" data-acct="${esc(f.id)}" onclick="accountSheet(${jsa(f.id)})"><div class="ai">${esc(f.icon||'💰')}</div><div class="an">${esc(shortName(f))}</div><div class="av2 num">${(+f.amt||0)||f.at||acctTx(f.id).length? bal(liveBal(f)) : '<span class="muted" style="font-size:13px;font-weight:600">Set balance</span>'}</div></button>`).join('')}
 ${funds().some(isCredit)?`<button class="ac" onclick="balancesSheet({})"><div class="ai">💳</div><div class="an">Owed</div><div class="av2 num">${bal(funds().filter(isCredit).reduce((a,f)=>a+Math.max(0,owedOf(f)),0))}</div></button>`:''}${efs.length?`<button class="ac" onclick="balancesSheet({})"><div class="ai">🛟</div><div class="an">Emergency</div><div class="av2 num">${bal(efTot)}</div></button>`:''}
     <button class="ac add" onclick="xferForm()" aria-label="Add money or transfer">⇄ Transfer</button></div></div>`;
 }
@@ -661,7 +693,7 @@ function upcomingCard(){ const t=todayStr(), rows=[];
   const tot=r2(rows.reduce((a,r)=>a+r.amt,0));
   return `<div class="card" style="border:1.5px solid ${rows.some(r=>r.bad)?'var(--bad)':'var(--warn)'}"><h2>🔔 Upcoming payments<span class="num" style="float:right">${sgd(tot)}</span></h2>
     ${rows.map(r=>`<div class="efrow"><div style="min-width:0"><div class="nm">${esc(r.f.icon||'💳')} ${esc(r.f.name)} <span class="num">${sgd(r.amt)}</span></div><div class="small ${r.bad?'neg':'muted'}">${r.when}${r.emi&&r.emi.length?' · incl. '+r.emi.map(x=>'EMI '+x.p.k+'/'+x.p.n+' '+sgd(x.p.amt)).join(', '):''}</div></div>
-      <div class="row" style="gap:6px;flex:none"><button class="btn sm" onclick="calReminder('${esc(r.f.id)}')" aria-label="Add reminder to calendar">📅</button><button class="btn sm primary" onclick="payBill('${esc(r.f.id)}',${r.amt})">Pay</button></div></div>`).join('')}
+      <div class="row" style="gap:6px;flex:none"><button class="btn sm" onclick="calReminder(${jsa(r.f.id)})" aria-label="Add reminder to calendar">📅</button><button class="btn sm primary" onclick="payBill(${jsa(r.f.id)},${+r.amt||0})">Pay</button></div></div>`).join('')}
     <div class="small muted" style="margin-top:8px">Pay the full amount by the due day to avoid late fees. “Pay” records a transfer from your bank, so nothing is counted twice.</div></div>`; }
 /* Ask how a credit shopping purchase is paid back */
 function emiAsk(more){ const f=funds().find(x=>x.id===E.pay), amt=r2(parseFloat(E.amt)), N=nextDue(f, E.date), opts=[1,3,6,12];
@@ -864,7 +896,7 @@ function xferForm(src, back, origin, preset){
     if(p.onSaved) p.onSaved(rec);
     save(); render(); toast(from? `Moved ${sgd(a)} from ${fundName(from)} to ${fundName(to)}` : `Added ${sgd(a)} to ${fundName(to)}`);
     if(fromAdd||(!back&&!p.back)) closeSheet(); else leave(); };
-  if($('#xDel')) confirmBtn($('#xDel'),'Tap again to delete',()=>{ DB.entries[e.id]={...DB.entries[e.id],del:true,upd:Date.now()}; save(); render(); toast('Deleted'); leave(); });
+  if($('#xDel')) confirmBtn($('#xDel'),'Tap again to delete',()=>{ DB.entries[e.id]=tomb(DB.entries[e.id]); save(); render(); toast('Deleted'); leave(); });
 }
 /* Move savings into the emergency fund (a transfer, so nothing is counted twice) */
 function moveSavings(amt, forYm){
@@ -875,20 +907,24 @@ function moveSavings(amt, forYm){
 }
 /* ============ Month records, statement and month-end prompt ============ */
 function setMonthFlag(ym, obj){
-  const c=cfg(ym), cur=DB.months[ym]&&!DB.months[ym].del? DB.months[ym] : {salary:+c.salary||0, budgets:{...(c.budgets||{})}, fundsIn:[], fundsAmt:{}};
-  DB.months[ym]={...cur, ...obj, upd:Date.now()}; save();
+  const c=cfg(ym), own=DB.months[ym]&&!DB.months[ym].del, src=c.inherited&&DB.months[c.inherited];
+  const cur=own? DB.months[ym] : {salary:+c.salary||0, budgets:{...(c.budgets||{})}, fundsIn:[], fundsAmt:{}, ...(src&&(src.sample||src.sampleBase)?{sampleBase:true}:{})};
+  const out={...cur, ...obj, upd:Date.now()};
+  if('salary' in obj || 'budgets' in obj){ delete out.sample; delete out.sampleBase; }   // the person's own numbers from now on
+  DB.months[ym]=out; save();
 }
 /* Money in and out of your accounts in a month (transfers between your own accounts don't count) */
 function flows(ym, lite){
-  const st=stats(ym, lite); let borrowed=0;
-  for(const e of Object.values(DB.entries)) if(!e.del && e.cat==='borrowed' && e.date.startsWith(ym)) borrowed+=e.amt;
+  const st=stats(ym, lite); let borrowed=0, payback=0;
+  for(const e of Object.values(DB.entries)) if(!e.del && e.date.startsWith(ym)){ if(e.cat==='borrowed') borrowed+=e.amt; else if(e.cat==='payback') payback+=e.amt; }
   const salary=st.salary, refunds=st.refund, repaid=st.by.repaid||0, spending=r2(st.gross);
-  return {st, salary, refunds, repaid, borrowed:r2(borrowed), spending, net:r2(salary+refunds+repaid+borrowed-spending)};
+  return {st, salary, refunds, repaid, borrowed:r2(borrowed), payback:r2(payback), spending, net:r2(salary+refunds+repaid+borrowed-payback-spending)};
 }
 function actualTotal(){ return r2(funds().reduce((a,f)=>a+liveBal(f),0) + emiDeferred(curYM())); }
 function anyBalanceSet(){ return funds().some(f=>f.at); }
 /* Opening balance of a month: stored, or carried from last month's closing. The first time, it is worked out from today's balances. */
-function openingOf(ym, depth=0){
+function openingOf(ym, depth=0){ return memo('op:'+ym, ()=>openingRaw(ym, depth)); }
+function openingRaw(ym, depth){
   const m=DB.months[ym];
   if(m && !m.del && typeof m.opening==='number') return m.opening;
   if(depth<24){ const pm=addMonths(ym,-1), po=openingOf(pm, depth+1); if(po!==null) return r2(po+flows(pm,true).net); }
@@ -934,7 +970,7 @@ function statementCard(ym, compact){
   const groups=groupTotals(c).map(g=>g.id==='lent'? {...g, v:(c.by.lent||0)+(c.by.payback||0)} : g).filter(g=>g.v>0.004).sort((a,b)=>b.v-a.v);   // gross, so the lines add up to Spending
   let h=`<div class="card"><h2>Statement · ${ymLabel(ym)}</h2>`+
     ln(`Opening balance <span class="small muted">1 ${ymLabel(ym,true).split(' ')[0]}${(DB.months[ym]||{}).openingAuto?' · worked out from your balances':''}</span>`, sgd(d.opening))+
-    ln('+ Salary', sgd(d.salary))+ (d.refunds? ln('+ Refunds', sgd(d.refunds)):'') + (d.repaid? ln('+ Friends paid back', sgd(d.repaid)):'') + (d.borrowed? ln('+ Borrowed from friends', sgd(d.borrowed)):'')+
+    ln('+ Salary', sgd(d.salary))+ (d.refunds? ln('+ Refunds', sgd(d.refunds)):'') + (d.repaid? ln('+ Friends paid back', sgd(d.repaid)):'') + (d.borrowed? ln('+ Borrowed from friends', sgd(d.borrowed)):'')+(d.payback? ln('− Paid back to friends', '('+sgd(d.payback)+')'):'')+
     ln('− Spending', '('+sgd(d.spending)+')')+ groups.map(g=>ln(esc(g.icon)+' '+esc(g.name), sgd(g.v),'sub')).join('')+
     ln(ym===curYM()?'Expected balance':'Closing balance', sgd(d.expected),'tot');
   if(d.actual!==null) h+= ln('Your account balances', sgd(d.actual),'muted') + diffBox;
@@ -987,65 +1023,81 @@ function cleanFundsIn(noSave){
 }
 
 /* ============ Calculations ============ */
-function monthEntries(ym){ const out=[];
+function monthEntries(ym){ return memo('idx', monthIndex).get(ym) || []; }
+/* One pass over all entries → entries per month (EMI purchases count 0 in their month; each instalment in the month it's due) */
+function monthIndex(){ const idx=new Map(), add=(ym,e)=>{ let a=idx.get(ym); if(!a) idx.set(ym, a=[]); a.push(e); };
+  for(const e of Object.values(DB.entries)){ if(e.del || CAT[e.cat]?.track) continue;
+    if(isEmi(e)){ add(e.date.slice(0,7), {...e, amt:0, emiOrig:e.amt}); for(const p of emiPlan(e)) add(p.ym, {...e, id:e.id+'#'+p.k, src:e.id, date:p.date, amt:p.amt, inst:{k:p.k,n:p.n}, emi:null}); }
+    else add(e.date.slice(0,7), e); }
+  return idx; }
+function monthEntriesRaw(ym){ const out=[];
   for(const e of Object.values(DB.entries)){ if(e.del || CAT[e.cat]?.track) continue;
     if(isEmi(e)){ if(e.date.startsWith(ym)) out.push({...e, amt:0, emiOrig:e.amt}); for(const p of emiPlan(e)) if(p.ym===ym) out.push({...e, id:e.id+'#'+p.k, src:e.id, date:p.date, amt:p.amt, inst:{k:p.k,n:p.n}, emi:null}); }
     else if(e.date.startsWith(ym)) out.push(e); }
   return out; }   // borrowed money is only a reminder, never spending
-function stats(ym, lite){
+function stats(ym, lite){ return memo('st:'+ym+(lite?':l':''), ()=>statsRaw(ym, lite)); }
+function statsRaw(ym, lite){
   const es = monthEntries(ym);
   const by = {}; CATS.forEach(c=>by[c.id]=0);
   const sub = {};   // spending per type, keyed 'cat:type'
   const daily = {}; const dailyLiving = {};
-  let inrHome = 0, sentHome = 0;
+  let inrHome = 0, sentHome = 0; const inrBy = {};
   for(const e of es){
     by[e.cat] = (by[e.cat]||0) + e.amt;
     if(e.sub) sub[e.cat+':'+e.sub]=(sub[e.cat+':'+e.sub]||0)+e.amt;
-    if(isSendCat(e.cat)){ sentHome += e.amt; if((e.homeCur||homeCode())===homeCode()) inrHome += (e.inr||(homeCode()===curCode()? e.amt : 0)); }
+    if(isSendCat(e.cat)){ sentHome += e.amt; const hv=homeAmt(e); if(hv!==null){ inrHome += hv; inrBy[e.cat]=(inrBy[e.cat]||0)+hv; } }
     const sign = CAT[e.cat]?.income ? -1 : 1;
     if(e.cat==='refund') continue;   // refunds don't reduce any day's spending (still taken off the month total)
     daily[e.date]=(daily[e.date]||0)+sign*e.amt;
     if(!LIVING_EXCL.has(e.cat)) dailyLiving[e.date]=(dailyLiving[e.date]||0)+sign*e.amt;
   }
+  for(const k in by) by[k]=r2(by[k]); for(const k in sub) sub[k]=r2(sub[k]);
   const refund = by.refund||0;
   const refundFor = {};
   const net = {...by}; delete net.refund; delete net.repaid;
   net.lent = (by.lent||0) - (by.repaid||0);
-  const gross = EXP_CATS.reduce((s,c)=>s+by[c.id],0);
-  const total = gross - refund - (by.repaid||0);
-  const living = total - [...LIVING_EXCL].reduce((s,k)=>s+(CAT[k]?.income ? -(by[k]||0) : (by[k]||0)),0);
+  net.lent = r2(net.lent);
+  const gross = r2(EXP_CATS.reduce((s,c)=>s+(by[c.id]||0),0));
+  const total = r2(gross - refund - (by.repaid||0));
+  const living = r2(total - [...LIVING_EXCL].reduce((s,k)=>s+(CAT[k]?.income ? -(by[k]||0) : (by[k]||0)),0));
   const c = cfg(ym);
   const days = daysElapsed(ym);
-  const budgetTotal = EXP_CATS.reduce((s,k)=>s+(+c.budgets[k.id]||0),0);
-  let budgetLeft = 0;
-  EXP_CATS.forEach(k=>{ const b=+c.budgets[k.id]||0; if(b>0) budgetLeft += b - net[k.id]; });
+  const budgetTotal = r2(BUDGET_CATS.reduce((s,k)=>s+(+c.budgets[k.id]||0),0));   // removed categories' old budgets don't count
+  const budgetLeft = r2(budgetTotal - total);   // every spend counts against the plan, budgeted or not
   const X = lite? 0 : fundsIncluded(ym);
-  return {es, by, net, sub, sentHome, refund, refundFor, gross, total, living, inrHome, daily, dailyLiving, cfg:c, salary:+c.salary||0,
+  return {es, by, net, sub, sentHome:r2(sentHome), inrBy, refund, refundFor, gross, total, living, inrHome:r2(inrHome), daily, dailyLiving, cfg:c, salary:+c.salary||0,
           days, left:daysLeft(ym), dim:dim(ym), budgetTotal, budgetLeft,
           extra:X, income:(+c.salary||0)+X,
-          saved:(+c.salary||0) + X - total,
+          saved:r2((+c.salary||0) + X - total),
           avg: days? (total+refund)/days : 0, avgLiving: days? living/days : 0};
 }
 /* Spending (not refunds, transfers or money coming back) on one day, with the number of entries */
 function daySpend(ds){ let s=0,n=0; for(const e of monthEntries(ds.slice(0,7))){ if(e.date!==ds || e.emiOrig) continue; const k=CAT[e.cat]; if(!k||k.income||k.track) continue; s+=e.amt; n++; } return {s:r2(s),n}; }
 /* Daily-living pace: what's left of the living budgets (food, travel, …) spread over the days left */
 const LIVING_CATS = () => BUDGET_CATS.filter(k=>!LIVING_EXCL.has(k.id));
+const livingRows = st => EXP_CATS.filter(k=>!k.friend && !LIVING_EXCL.has(k.id) && (!k.hidden || (st.net[k.id]||0)>0.004));
 function livingPace(st){
-  const cats=LIVING_CATS(), budget=cats.reduce((a,k)=>a+(+st.cfg.budgets[k.id]||0),0), spent=r2(cats.reduce((a,k)=>a+(st.net[k.id]||0),0));
+  const budget=LIVING_CATS().reduce((a,k)=>a+(+st.cfg.budgets[k.id]||0),0), spent=r2(livingRows(st).reduce((a,k)=>a+(st.net[k.id]||0),0));
   return {budget, spent, canDay: budget>0 && st.left>0 ? (budget-spent)/st.left : null};
 }
 function status(spent,budget,cat){
   if(!budget) return null;
   const p = spent/budget;
-  if(FIXED.has(cat)) return p>1.005?'bad':'good';   // rent / money home: paying the planned amount is on track
+  if(FIXED.has(cat)) return spent-budget>0.005?'bad':'good';   // a bill paid in full is on track; anything over is over
   if(p>1) return 'bad'; if(p>=0.85) return 'warn'; return 'good';
 }
 
 /* ============ Exchange rate (profile currency -> home currency) ============ */
+const RATE_TRY={};
 async function fetchRate(date){
   const base=curCode(), to=homeCode(); if(base===to) return 1;
   const today = todayStr(), key = date+'|'+base+to;
   if(date!==today && DB.rates[key]) return DB.rates[key];
+  const t=RATE_TRY[key]; if(t && (t.v ? Date.now()-t.at<3600e3 : Date.now()-t.at<300e3)) return t.v||null;   // today's rate for an hour; a failure for 5 minutes
+  const v=await fetchRateNet(date, base, to, today, key); RATE_TRY[key]={v, at:Date.now()}; return v;
+}
+async function fetchRateNet(date, base, to, today, key){
+  const fetch=(u,o)=>{ const c=('AbortController' in window)? new AbortController() : null; const tm=setTimeout(()=>{ try{ c&&c.abort(); }catch(e){} }, 8000); return window.fetch(u,{...(o||{}), signal:c?c.signal:undefined}).finally(()=>clearTimeout(tm)); };
   const tag = date>=today ? 'latest' : date;
   const urls = [
     `https://api.frankfurter.dev/v1/${tag}?base=${base}&symbols=${to}`,
@@ -1062,12 +1114,14 @@ async function fetchRate(date){
 const S = { allCats:false, ym: curYM(), tab:'home', histCat:'all', dailyMode:'living', histView:'calendar', calMode:'living', selDay:null };
 const $ = s => document.querySelector(s);
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),2600); }
-function tip(ev,html){ const t=$('#tip'); if(!html){t.classList.remove('on');return;} t.innerHTML=html; t.classList.add('on');
+function tip(ev,html){ const t=$('#tip'); if(!html){t.classList.remove('on');return;}
+  t.innerHTML=esc(html).replace(/&lt;(\/?)(b|br)&gt;/g,'<$1$2>');   // tooltip text comes from data-tip, which the browser has already un-escaped
+  t.classList.add('on');
   const x = (ev.touches?ev.touches[0].clientX:ev.clientX), y=(ev.touches?ev.touches[0].clientY:ev.clientY);
   const w=t.offsetWidth, h=t.offsetHeight; t.style.left=Math.min(window.innerWidth-w-8, Math.max(8,x-w/2))+'px'; t.style.top=Math.max(8,y-h-12)+'px'; }
 document.addEventListener('scroll',()=>tip(null,null),{passive:true});
 
-function render(){
+function render(){ bump();
   $('#mLabel').innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>${ymLabel(S.ym,true)}`;
   document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===S.tab));
   ['home','history','analysis','budget','settings'].forEach(t=>$('#tab-'+t).classList.toggle('hidden',t!==S.tab));
@@ -1109,7 +1163,7 @@ function renderHome(){
     const lbl=(ds,x)=>{ const [Y,M,D]=ds.split('-').map(Number); return new Date(Y,M-1,D).toLocaleDateString('en-SG',{weekday:'short',day:'numeric',month:'short'})+' · '+x.n+' entr'+(x.n===1?'y':'ies'); };
     h += `<div class="qs">${tile('Today spent', sgd(t0.s), lbl(today,t0),'',today)}${tile('Yesterday spent', sgd(t1.s), lbl(yd,t1),'',yd)}</div>`;
   } else {
-    h += `<div class="qs">${tile('Daily living avg', sgd(st.avgLiving), 'excl. bills &amp; one-offs')}${st.sentHome? tile('Sent home', homeCode()!==curCode()? inr(st.inrHome) : sgd(st.sentHome), homeCode()!==curCode()? sgd(st.sentHome) : 'this month') : tile('Spent', sgd(st.total), ymLabel(S.ym,true))}</div>`;
+    h += `<div class="qs">${tile('Daily living avg', sgd(st.avgLiving), 'excl. bills &amp; one-offs')}${st.sentHome? tile('Sent home', homeCode()!==curCode()&&st.inrHome? inr(st.inrHome) : sgd(st.sentHome), homeCode()!==curCode()&&st.inrHome? sgd(st.sentHome) : 'this month') : tile('Spent', sgd(st.total), ymLabel(S.ym,true))}</div>`;
   }
   if(noBudget) h += `<div class="card"><b>Welcome!</b> Set your monthly salary and category budgets to see what's left to spend.
       <div class="btns" style="margin-top:10px"><button class="btn primary" onclick="go('budget')">Set salary &amp; budgets</button><button class="btn" onclick="loadSample()">Try with sample data</button></div></div>`;
@@ -1122,7 +1176,7 @@ function renderHome(){
   if(!S.allCats){
     h += rows.length? rows.slice(0,5).map(r=>{ const stt=status(r.v,r.b,r.k.id), rem=r.b-r.v;
       return `<div class="tc" data-cat="${r.k.id}" onclick="S.allCats=true;renderHome()" style="cursor:pointer"><div class="ic">${esc(r.k.icon)}</div>
-        <div style="min-width:0"><div class="nm">${esc(r.k.name)}</div><div class="mt">${r.b? (rem>=0? (FIXED.has(r.k.id)&&rem<0.005? 'Paid in full' : sgd(rem)+' left of '+sgd0(r.b)) : '<span class="neg">'+sgd(-rem)+' over '+sgd0(r.b)+'</span>') : 'No budget'}${r.k.send&&st.inrHome&&homeCode()!==curCode()?' · '+inr(st.inrHome):''}</div>
+        <div style="min-width:0"><div class="nm">${esc(r.k.name)}</div><div class="mt">${r.b? (rem>=0? (FIXED.has(r.k.id)&&rem<0.005? 'Paid in full' : sgd(rem)+' left of '+sgd0(r.b)) : '<span class="neg">'+sgd(-rem)+' over '+sgd0(r.b)+'</span>') : 'No budget'}${r.k.send&&st.inrBy[r.k.id]&&homeCode()!==curCode()?' · '+inr(st.inrBy[r.k.id]):''}</div>
         ${r.b?`<div class="bar"><i class="${stt}" style="width:${Math.min(100,r.v/r.b*100)}%"></i></div>`:''}</div>
         <div class="am num">${sgd(r.v)}<div class="mt">${Math.round(r.v/(st.total+st.refund||1)*100)}%</div></div></div>`; }).join('')
       + (st.refund? `<div class="small muted" style="margin-top:8px">↩️ Refunds received: <b class="pos num">+${sgd(st.refund)}</b> (taken off the month total)</div>` : '')
@@ -1135,7 +1189,7 @@ function renderHome(){
     const b = +c.budgets[k.id]||0;
     const avg = st.days? spent/st.days : 0;
     if(k.income){
-      h += `<div class="cat"><div class="row"><div class="ic">${k.icon}</div><div><div class="nm">${k.name}</div><div class="meta">Money received back · taken off the month total</div></div>
+      h += `<div class="cat"><div class="row"><div class="ic">${esc(k.icon)}</div><div><div class="nm">${esc(k.name)}</div><div class="meta">Money received back · taken off the month total</div></div>
         <div class="amt num"><b class="pos">+${sgd(st.by.refund)}</b></div></div></div>`;
       continue;
     }
@@ -1143,13 +1197,14 @@ function renderHome(){
     const pct = b? Math.min(100, spent/b*100) : 0;
     const rem = b - spent;
     let meta = `Avg ${sgd(avg)}/day`;
-    if(k.send && st.inrHome && homeCode()!==curCode()) meta += ` · ${inr(st.inrHome)}`;
+    if(k.send && st.inrBy[k.id] && homeCode()!==curCode()) meta += ` · ${inr(st.inrBy[k.id])}`;
     h += `<div class="cat" data-cat="${k.id}"><div class="row"><div class="ic">${esc(k.icon)}</div><div style="min-width:0"><div class="nm">${esc(k.name)}</div><div class="meta">${meta}</div></div>
       <div class="amt num"><b>${sgd(spent)}</b><div class="meta">${b? (rem>=0? sgd(rem)+' left' : '<span class="neg">'+sgd(-rem)+' over</span>') : 'no budget'}</div></div></div>
       ${b?`<div class="bar" style="margin-left:44px" title="${Math.round(spent/b*100)}% of ${sgd0(b)}"><i class="${stt}" style="width:${pct}%"></i></div>`:''}`;
     if(k.subs && k.subs.length){
       const subCard = t=>{ const v=st.sub[k.id+':'+t.id]||0; return `<div class="sub">${esc(t.icon)} ${esc(t.name)}<b class="num">${sgd(v)}</b><span class="muted num">avg ${sgd(st.days?v/st.days:0)}/day</span></div>`; };
-      h += `<div class="subs">` + k.subs.map(subCard).join('') + `</div>`;
+      const rest=r2((st.net[k.id]||0)-k.subs.reduce((a,t)=>a+(st.sub[k.id+':'+t.id]||0),0));
+      h += `<div class="subs">` + k.subs.map(subCard).join('') + (rest>0.004? `<div class="sub">• Other / removed types<b class="num">${sgd(rest)}</b><span class="muted num">avg ${sgd(st.days?rest/st.days:0)}/day</span></div>` : '') + `</div>`;
     }
     h += `</div>`;
   }
@@ -1169,11 +1224,11 @@ function entRow(e){
   const extra = [];
   if(isSendCat(e.cat) && e.inr && e.homeCur && e.homeCur!==(e.cur||curCode())) extra.push(inr(e.inr, e.homeCur)+(e.rate?' @ '+e.rate.toFixed(2):''));
   if(e.note) extra.push(esc(e.note));
-  if(e.inst) extra.unshift('EMI '+e.inst.k+'/'+e.inst.n);
-  if(e.emiOrig){ const pl=emiPlan({...e, amt:e.emiOrig}); extra.unshift('On EMI · '+e.emi.n+' × '+sgd(pl[0].amt)+' from '+ymLabel(pl[0].ym,true)); }
+  if(e.inst) extra.unshift('EMI '+(+e.inst.k||0)+'/'+(+e.inst.n||0));
+  if(e.emiOrig){ const pl=emiPlan({...e, amt:e.emiOrig}); extra.unshift('On EMI · '+(+e.emi.n||0)+' × '+sgd(pl[0].amt)+' from '+ymLabel(pl[0].ym,true)); }
   if(e.pay && fundName(e.pay)) extra.push(esc(fundName(e.pay)));
   if(!extra.length) extra.push(s? esc(k.name) : dayLabel(e.date));
-  return `<div class="ent" onclick="openEntry('${esc(e.src||e.id)}')"><div class="ic">${esc(s?s.icon:k.icon)}</div><div class="t"><div>${title}</div><div>${extra.join(' · ')}</div></div>
+  return `<div class="ent" onclick="openEntry(${jsa(e.src||e.id)})"><div class="ic">${esc(s?s.icon:k.icon)}</div><div class="t"><div>${title}</div><div>${extra.join(' · ')}</div></div>
     <div class="num ${k.income?'pos':''}" style="font-weight:600${e.emiOrig?';opacity:.55':''}">${e.emiOrig? sgd(e.emiOrig) : (k.income?'+':'')+sgd(e.amt)}</div></div>`;
 }
 
@@ -1322,7 +1377,7 @@ function monthSummaryCard(ym, heading){
   const prev=savedBefore(ym);
   let h=`<div class="card"><h2>${heading} · ${ymLabel(ym)}</h2>`;
   if(!base){ h+=`<div class="muted">No expenses recorded for ${ymLabel(ym)} yet.</div></div>`; return h; }
-  h+=`<div class="msum">${donutSvg(parts, done&&hasSal?sgd0(st.salary):sgd0(st.total), done&&hasSal?'salary':(done?'spent':'spent so far'))}<div class="plist">`+
+  h+=`<div class="msum">${donutSvg(parts, done&&hasSal?sgd0(st.salary):sgd0(base), done&&hasSal?'salary':(done?'spent':'spent so far'))}<div class="plist">`+
      parts.map(p=>`<div data-tip="<b>${esc(p.name)}</b><br>${sgd(p.v)}"><i style="--c:${p.c}"></i><span>${esc(p.name)}</span><span class="num">${sgd(p.v)}</span><span class="pc">${Math.round(p.v/base*100)}%</span></div>`).join('')+
      (done && hasSal && saved<0?`<div><i style="--c:var(--bad)"></i><span>Overspent</span><span class="num neg">${sgd(-saved)}</span><span class="pc"></span></div>`:'')+
      `</div></div>`;
@@ -1393,8 +1448,8 @@ function renderAnalysis(){
 
   // budget vs actual table
   h += `<div class="card"><h2>Budget vs actual</h2><div class="tablewrap"><table class="t"><thead><tr><th>Category</th><th>Budget</th><th>Spent</th><th>Left</th><th>Avg/day</th><th>Status</th></tr></thead><tbody>`;
-  for(const k of BUDGET_CATS){
-    const b=+st.cfg.budgets[k.id]||0, s=st.net[k.id], stt=status(s,b,k.id);
+  for(const k of EXP_CATS.filter(k=>!k.friend && (!k.hidden || (st.net[k.id]||0)>0.004))){
+    const b=k.hidden? 0 : (+st.cfg.budgets[k.id]||0), s=st.net[k.id]||0, stt=status(s,b,k.id);
     h += `<tr><td>${esc(k.icon)} ${esc(k.name)}</td><td class="num">${b?sgd0(b):'–'}</td><td class="num">${sgd(s)}</td><td class="num ${b&&b-s<0?'neg':''}">${b?sgd(b-s):'–'}</td><td class="num">${sgd(st.days?s/st.days:0)}</td><td>${stt?`<span class="pill ${stt}">${stt==='bad'?'Over':stt==='warn'?'Near limit':'On track'}</span>`:''}</td></tr>`;
   }
   h += `<tr><td><b>Total</b></td><td class="num"><b>${sgd0(st.budgetTotal)}</b></td><td class="num"><b>${sgd(st.total)}</b></td><td class="num"><b>${st.budgetTotal?sgd(st.budgetTotal-st.total):'–'}</b></td><td class="num"><b>${sgd(st.avg)}</b></td><td></td></tr>`;
@@ -1463,7 +1518,7 @@ function dailyChart(st){
 }
 function trendChart(){
   const months = Array.from({length:6},(_,i)=>addMonths(S.ym,i-5));
-  const data = months.map(m=>{ const s=stats(m); return {m, spent:s.total, saved: s.salary? s.saved : 0, salary:s.salary, home: homeCode()!==curCode()? s.inrHome : s.sentHome}; });
+  const data = months.map(m=>{ const s=stats(m); return {m, spent:s.total, saved: s.salary? s.saved : 0, salary:s.salary, home: s.sentHome, homeIn: homeCode()!==curCode()? s.inrHome : 0}; });
   const W=chartW(),H=210,L=44,R=8,T=10,B=24;
   const mx = niceMax(Math.max(1,...data.map(d=>Math.max(d.spent,d.saved))));
   const mn = Math.min(0,...data.map(d=>d.saved)); const lo = mn<0? -niceMax(-mn):0;
@@ -1481,7 +1536,7 @@ function trendChart(){
   });
   s+=`<line x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--muted)"/></svg>`;
   s+=`<div class="tablewrap" style="margin-top:8px"><table class="t"><thead><tr><th>Month</th><th>Salary</th><th>Spent</th><th>Saved</th><th>Rate</th><th>Sent home</th></tr></thead><tbody>`+
-    data.slice().reverse().map(d=>`<tr><td>${ymLabel(d.m,true)}</td><td class="num">${d.salary?sgd0(d.salary):'–'}</td><td class="num">${sgd0(d.spent)}</td><td class="num ${d.saved<0?'neg':''}">${d.salary?sgd0(d.saved):'–'}</td><td class="num">${d.salary?Math.round(d.saved/d.salary*100)+'%':'–'}</td><td class="num">${d.home?(homeCode()!==curCode()?inr(d.home):sgd0(d.home)):'–'}</td></tr>`).join('')+`</tbody></table></div>`;
+    data.slice().reverse().map(d=>`<tr><td>${ymLabel(d.m,true)}</td><td class="num">${d.salary?sgd0(d.salary):'–'}</td><td class="num">${sgd0(d.spent)}</td><td class="num ${d.saved<0?'neg':''}">${d.salary?sgd0(d.saved):'–'}</td><td class="num">${d.salary?Math.round(d.saved/d.salary*100)+'%':'–'}</td><td class="num">${d.home?(d.homeIn?inr(d.homeIn):sgd0(d.home)):'–'}</td></tr>`).join('')+`</tbody></table></div>`;
   return s;
 }
 
@@ -1500,11 +1555,8 @@ function moneySheet(){
       ${ln('Money left to spend',sgd(have),'tot')}
       <div class="small muted" style="margin-top:8px">Emergency fund kept aside: ${efs.map(f=>esc(f.name)+' '+sgd(liveBal(f))).join(', ')||'none'} = <b class="num">${sgd(efKept(ym))}</b>. Change which accounts count on the Budget tab.</div></div>
     <div class="card"><h2>Why “Budget left” is different</h2>
-      ${ln('Budget left <span class="small muted">budgets − spending in those categories</span>',sgd(st.budgetLeft))}
+      ${ln('Budget left <span class="small muted">budgets − everything spent (after refunds)</span>',sgd(st.budgetLeft))}
       ${ln(plan<0?'Budgets are more than salary + savings used':'Salary + savings used is more than budgets',sg(plan),'sub2')}
-      ${st.refund?ln('Refunds (not taken off any budget)',sg(st.refund),'sub2'):''}
-      ${st.by.repaid?ln('Friends paid back',sg(st.by.repaid),'sub2'):''}
-      ${unb?ln('Spending with no budget (subscriptions, friends…)',sg(-unb),'sub2'):''}
       ${ln('Money left (worked out)',sgd(calc),'tot')}
       ${Math.abs(creditNet())>0.004? ln('Spending accounts '+sgd(spendTotal())+' − credit owed (not yet counted as spending)', sgd(r2(spendTotal()+creditNet())),'sub2') : ''}
       ${Math.abs(diff)<0.005? '<div class="stdiff ok"><span>Matches your accounts</span><span>✓</span></div>' : `<div class="stdiff bad"><span>Accounts hold ${diff>0?'more':'less'}</span><span class="num">${diff>0?'+':'−'}${sgd(Math.abs(diff))}</span></div><div class="small muted" style="margin-top:6px">Usually a payment or refund logged without “Paid with”, or a balance that needs updating.</div>`}
@@ -1513,8 +1565,8 @@ function moneySheet(){
 }
 /* How the two living-pace figures are worked out */
 function paceSheet(){
-  const ym=S.ym, st=stats(ym), cats=LIVING_CATS(), B=st.cfg.budgets||{}, p=livingPace(st), cur=ym===curYM();
-  const rows=cats.map(k=>`<tr><td>${esc(k.icon)} ${esc(k.name)}</td><td class="num">${sgd(st.net[k.id]||0)}</td><td class="num">${+B[k.id]?sgd0(+B[k.id]):'—'}</td></tr>`).join('');
+  const ym=S.ym, st=stats(ym), cats=livingRows(st), B=st.cfg.budgets||{}, p=livingPace(st), cur=ym===curYM();
+  const rows=cats.map(k=>`<tr><td>${esc(k.icon)} ${esc(k.name)}</td><td class="num">${sgd(st.net[k.id]||0)}</td><td class="num">${!k.hidden&&+B[k.id]?sgd0(+B[k.id]):'—'}</td></tr>`).join('');
   openSheet(`<div class="sheettop"><h3>Daily living pace</h3><button class="btn sm" onclick="closeSheet()">Close</button></div>
     <div class="small muted" style="margin-top:6px">Daily living = everyday spending. Monthly bills, one-off categories, friends and refunds are left out. Choose which is which in Settings → Categories.</div>
     <table class="tbl" style="width:100%;margin-top:10px"><thead><tr><th style="text-align:left">Category</th><th>Spent</th><th>Budget</th></tr></thead><tbody>${rows}
@@ -1599,7 +1651,7 @@ function renderBudget(){
   const living = LIVING_CATS(), bills = BUDGET_CATS.filter(k=>LIVING_EXCL.has(k.id));
   const row = k => { const sp=st.net[k.id]||0, b=+B[k.id]||0, rem=b-sp, stt=status(sp,b,k.id);
     const info = b? (rem>=0? (FIXED.has(k.id)&&rem<0.005? 'paid in full' : sgd(rem)+' left') : '<span class="neg">'+sgd(-rem)+' over</span>') : (sp>0? '<span style="color:var(--warn)">no budget set</span>' : 'no budget');
-    return `<div class="bgr"><div class="bgm"><div class="nm ${stt==='bad'?'neg':''}">${esc(k.icon)} ${esc(k.name)}</div><div class="meta">${k.send?'Sent':'Spent'} ${sgd(sp)}${k.send&&st.inrHome&&homeCode()!==curCode()?' · '+inr(st.inrHome):''} · ${info}</div>
+    return `<div class="bgr"><div class="bgm"><div class="nm ${stt==='bad'?'neg':''}">${esc(k.icon)} ${esc(k.name)}</div><div class="meta">${k.send?'Sent':'Spent'} ${sgd(sp)}${k.send&&st.inrBy[k.id]&&homeCode()!==curCode()?' · '+inr(st.inrBy[k.id]):''} · ${info}</div>
       ${b?`<div class="bar"><i class="${stt||''}" style="width:${Math.min(100,sp/b*100)}%"></i></div>`:''}</div>
       <input class="in num bin" type="number" inputmode="decimal" min="0" step="1" data-b="${k.id}" value="${b||''}" placeholder="Set" aria-label="${esc(k.name)} budget"></div>`; };
   const sum = cats => ({b:cats.reduce((a,k)=>a+(+B[k.id]||0),0), s:cats.reduce((a,k)=>a+(st.net[k.id]||0),0)});
@@ -1664,7 +1716,7 @@ function renderSettings(){
   $('#dCsv').onclick=()=>exportCSV(S.ym); $('#dCsvAll').onclick=()=>exportCSV(null);
   $('#sExport').onclick=exportSyncFile; $('#sImport').onclick=()=>$('#fileIn').click();
   if($('#dSampleOff')) $('#dSampleOff').onclick=()=>{ removeSample(); toast('Sample data removed'); render(); };
-  confirmBtn($('#dClear'),'Tap again to erase '+p.name+"'s data",()=>{ DB=blankDB(); buildCats(); persist(); toast(p.name+"'s data on this device erased"); render(); maybeWizard(); });
+  confirmBtn($('#dClear'),'Tap again to erase '+p.name+"'s data",()=>{ const was=cloudOn(); stopSync(); if(was) gClear(); gVer=null; gFirst=true; cloudState='off'; DB=blankDB(); buildCats(); persist(); toast(p.name+"'s data on this device erased"+(was?'. Signed out of Google: your Drive copy is untouched (delete it in Settings → Sync if you want).':'')); render(); maybeWizard(); });
   renderCloudStatus();
 }
 function applyTheme(){ const t=DB.settings.theme; if(t==='light'||t==='dark') document.documentElement.dataset.theme=t; else delete document.documentElement.dataset.theme; }
@@ -1770,7 +1822,7 @@ function catEdit(id){
     const obj={...(id?c:{}), id: id||('c'+Date.now().toString(36)), name:n, icon:ic, kind, reason:$('#ceReason').checked||undefined, send: ($('#ceSend')&&$('#ceSend').checked)||undefined, subs: subs.length? subs : undefined};
     if(!obj.reason) delete obj.reason; if(!obj.send) delete obj.send;
     saveCats(id? L.map(x=>x.id===id?obj:x) : [...L, obj]); render(); toast(id?'Saved':'Added '+n); catSheet(); };
-  if($('#ceDel')) confirmBtn($('#ceDel'),'Tap again to remove',()=>{ const L=userCats(); saveCats(used? L.map(x=>x.id===id?{...x,hidden:true}:x) : L.filter(x=>x.id!==id)); render(); toast(c.name+' removed'); catSheet(); });
+  if($('#ceDel')) confirmBtn($('#ceDel'),'Tap again to remove',()=>{ const L=userCats(); saveCats(L.map(x=>x.id===id?{...x,hidden:true}:x)); render(); toast(c.name+' removed'); catSheet(); });
 }
 
 /* ============ Setup wizard: first run (and "Run the setup again" in Settings) ============ */
@@ -1892,7 +1944,7 @@ const FTX = {
     tA:(n,a)=>`Lent ${a} to ${n}`, tB:(n,a)=>`${n} paid back ${a}`},
   owe:{A:'borrowed', B:'payback', icon:'🙏', title:'You owe friends', owes:'you owe', times:'borrowed', empty:'Borrowed from a friend? Tap to keep track',
     none:'You don’t owe anyone right now.', add:'+ Borrowed money', addB:'+ Paid back', more:'+ Borrow more', backBtn:'Pay back',
-    kA:'You owe', kT:'Total borrowed', note:'Borrowing isn’t counted as spending. Paying it back is.',
+    kA:'You owe', kT:'Total borrowed', note:'Borrowing and paying it back aren’t spending. What you buy with the money is.',
     fA:'🙏 Money borrowed', fB:'📤 Paid back to friend', amtA:'Amount borrowed', amtB:'Amount paid', iA:'Borrowed', iB:'Paid back',
     tA:(n,a)=>`Borrowed ${a} from ${n}`, tB:(n,a)=>`Paid ${a} back to ${n}`}};
 const fdir = cat => CAT[cat]?.owe ? 'owe' : 'lend';
@@ -1977,7 +2029,7 @@ function friendForm(kind, name, src, amt){
     toast(first? T.tA(n,sgd(a)) : T.tB(n,sgd(a)));
     friendDetail(n, dir);
   };
-  if($('#ffDel')) confirmBtn($('#ffDel'),'Tap again to delete',()=>{ DB.entries[e.id]={...DB.entries[e.id], del:true, upd:Date.now()}; save(); render(); toast('Deleted'); friendDetail(e.friend, dir); });
+  if($('#ffDel')) confirmBtn($('#ffDel'),'Tap again to delete',()=>{ DB.entries[e.id]=tomb(DB.entries[e.id]); save(); render(); toast('Deleted'); friendDetail(e.friend, dir); });
 }
 
 /* ============ Add / edit entry sheet ============ */
@@ -2090,7 +2142,7 @@ function drawSheet(){
   if($('#emiChg')) $('#emiChg').onclick=()=>{ readSheet(); emiAsk(false); };
   $('#eSave').onclick=()=>commitEntry(false);
   if($('#eSaveMore')) $('#eSaveMore').onclick=()=>commitEntry(true);
-  if($('#eDel')) confirmBtn($('#eDel'),'Tap again to delete',()=>{ DB.entries[E.id]={...DB.entries[E.id],del:true,upd:Date.now()}; save(); closeSheet(); toast('Deleted'); render(); });
+  if($('#eDel')) confirmBtn($('#eDel'),'Tap again to delete',()=>{ DB.entries[E.id]=tomb(DB.entries[E.id]); save(); closeSheet(); toast('Deleted'); render(); });
   if(!E.id && !E._focused){ E._focused=true; amt.focus(); }
 }
 async function loadRate(){
@@ -2111,16 +2163,18 @@ function commitEntry(more){
   readSheet();
   const amt = r2(parseFloat(E.amt));
   if(!E.cat || !CAT[E.cat]){ toast('Choose a category'); return; }
-  if(CAT[E.cat].subs && CAT[E.cat].subs.length && !(E.sub && CAT[E.cat].subs.some(t=>t.id===E.sub))){ toast('Choose a type: '+CAT[E.cat].subs.map(t=>t.name).join(', ')); return; }
+  if(CAT[E.cat].subs && CAT[E.cat].subs.length && !(E.sub && (CAT[E.cat].subs.some(t=>t.id===E.sub) || (E.id && DB.entries[E.id] && DB.entries[E.id].cat===E.cat && DB.entries[E.id].sub===E.sub)))){ toast('Choose a type: '+CAT[E.cat].subs.map(t=>t.name).join(', ')); return; }
   if(!(amt>0)){ toast('Enter an amount'); $('#eAmt').focus(); return; }
   if(CAT[E.cat].reason && !(E.note||'').trim()){ toast(E.cat==='refund'?'Add a reason for this refund':'Add a reason for this '+CAT[E.cat].name.toLowerCase()+' expense'); $('#eNote').focus(); return; }
+  if(isSendCat(E.cat) && curCode()!==homeCode() && !(+E.inr>0) && !(+E.rate>0)){ toast('Enter the amount in '+homeCode()+' or the exchange rate'); return; }
   const pf=E.pay? funds().find(x=>x.id===E.pay) : null, onCredit=isCredit(pf), emiOk = onCredit && emiCat(E.cat);
   if(emiOk && !E.id && E.emiChoice===undefined){ emiAsk(more); return; }
   const now=Date.now();
   const rec = {id:E.id||uid(), date:E.date, cat:E.cat, amt, note:(E.note||'').trim(), upd:now, cr:E.cr||now};
-  if(emiOk){ const ch = E.emiChoice!==undefined? E.emiChoice : (E.emi||null); if(ch && ch.n>1) rec.emi={n:ch.n, fee:+ch.fee||0, start:(E.emi&&E.emi.start&&E.emiChoice===undefined)? E.emi.start : addMonths(ymOf(E.date),1)}; }
+  if(emiOk){ const ch = E.emiChoice!==undefined? E.emiChoice : (E.emi||null); if(ch && ch.n>1) rec.emi={n:ch.n, fee:+ch.fee||0, start:(E.emi&&E.emi.start&&E.emiChoice===undefined&&E.id&&DB.entries[E.id]&&ymOf(DB.entries[E.id].date)===ymOf(E.date))? E.emi.start : addMonths(ymOf(E.date),1)}; }
   const prevOwed = onCredit? owedOf(pf) - (E.id&&DB.entries[E.id]&&DB.entries[E.id].pay===pf.id? (DB.entries[E.id].amt+(DB.entries[E.id].emi?emiFee(DB.entries[E.id]):0)) : 0) : 0;
   if(CAT[E.cat].subs && CAT[E.cat].subs.length && E.sub) rec.sub=E.sub;
+  else if(E.sub && E.id && DB.entries[E.id] && DB.entries[E.id].sub===E.sub && DB.entries[E.id].cat===E.cat) rec.sub=E.sub;
   if(E.pay){ rec.pay=E.pay; setLastPay(E.pay); }
   rec.cur = curCode();
   if(isSendCat(E.cat)){ if(curCode()===homeCode()){ rec.rate=1; rec.inr=amt; } else { rec.rate=+E.rate||null; rec.inr= +E.inr || (rec.rate? Math.round(amt*rec.rate):null); } rec.homeCur=homeCode(); }
@@ -2128,7 +2182,7 @@ function commitEntry(more){
   save();
   const m=ymOf(rec.date); if(m!==S.ym) S.ym=m;
   toast(`Saved ${sgd(amt)} · ${CAT[rec.cat].name}${rec.emi?' · EMI '+rec.emi.n+' months':''}`);
-  if(onCredit && +pf.limit>0 && prevOwed+amt+(rec.emi?rec.emi.fee:0) > +pf.limit+0.004) setTimeout(()=>toast(`⚠ ${pf.name} is over its ${sgd0(+pf.limit)} limit by ${sgd(prevOwed+amt-(+pf.limit))}`),1600);
+  if(onCredit && +pf.limit>0 && prevOwed+amt+(rec.emi?rec.emi.fee:0) > +pf.limit+0.004) setTimeout(()=>toast(`⚠ ${pf.name} is over its ${sgd0(+pf.limit)} limit by ${sgd(prevOwed+amt+(rec.emi?rec.emi.fee:0)-(+pf.limit))}`),1600);
   render();
   if(more){ const keep={cat:E.cat,sub:E.sub,date:E.date,back:E.back,pay:E.pay}; delete E.emiChoice; E={id:null,...keep,amt:'',inr:'',rate:isSendCat(E.cat)?E.rate:'',note:''}; drawSheet(); } else closeSheet();
 }
@@ -2139,7 +2193,7 @@ const idb = (()=>{ let dbp=null; const open=()=>dbp||(dbp=new Promise((res,rej)=
   return { get:k=>tx('readonly',s=>s.get(k)).catch(()=>null), set:(k,v)=>tx('readwrite',s=>s.put(v,k)).catch(()=>null), del:k=>tx('readwrite',s=>s.delete(k)).catch(()=>null) };
 })();
 let SH = null, syncState='none', syncTimer=null, syncing=false;
-function exportObj(){ return {app:'pocket-budget', version:1, profileName:curProfile().name, currency:curCode(), homeCur:curProfile().homeCur||'', exported:new Date().toISOString(), entries:DB.entries, months:DB.months, rates:DB.rates, settings:DB.settings}; }
+function exportObj(){ return {app:'pocket-budget', version:1, syncFile:gFileName(), profileName:curProfile().name, currency:curCode(), homeCur:curProfile().homeCur||'', exported:new Date().toISOString(), entries:DB.entries, months:DB.months, rates:DB.rates, settings:DB.settings}; }
 function merge(r, cloud){
   if(!r || typeof r!=='object' || !r.entries || typeof r.entries!=='object') throw new Error('Not a Pocket Budget file');
   if(!cloud && r.profileName && r.profileName.trim().toLowerCase()!==curProfile().name.trim().toLowerCase())
@@ -2147,36 +2201,98 @@ function merge(r, cloud){
   if(r.currency && r.currency!==curCode())
     throw new Error(`this file is in ${r.currency} but this profile uses ${curCode()}. Set the profile's currency to ${r.currency} first`);
   let n=0; const bad=k=>k==='__proto__'||k==='constructor'||k==='prototype';
-  for(const [id,e] of Object.entries(r.entries)){ if(bad(id) || !e || typeof e!=='object' || typeof e.date!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date) || typeof e.amt!=='number') continue;
-    const l=DB.entries[id]; if(!l || (e.upd||0)>(l.upd||0)){ DB.entries[id]=e; n++; } }
-  for(const [m,c] of Object.entries(r.months||{})){ if(bad(m) || !c || typeof c!=='object' || !/^\d{4}-\d{2}$/.test(m)) continue; const l=DB.months[m]; if(!l || (c.upd||0)>(l.upd||0)){ DB.months[m]=c; n++; } }
-  for(const [d,v] of Object.entries(r.rates||{})) if(!DB.rates[d]) DB.rates[d]=v;
-  if(r.settings && typeof r.settings==='object' && !Array.isArray(r.settings) && (r.settings.upd||0)>(DB.settings.upd||0)){ DB.settings=Object.assign({upd:0, theme:'auto'}, r.settings); applyTheme(); buildCats(); n++; }
+  for(const [id,e] of Object.entries(r.entries)){ const c=cleanEntry(id,e); if(!c) continue;
+    const l=DB.entries[id]; if(!l || (c.upd||0)>(l.upd||0)){ DB.entries[id]=c; n++; } }
+  for(const [m,c] of Object.entries(r.months||{})){ if(bad(m) || !/^\d{4}-\d{2}$/.test(m)) continue; const v=cleanMonth(c); if(!v) continue;
+    const l=DB.months[m]; if(!l || (v.upd||0)>(l.upd||0)){ DB.months[m]=v; n++; } }
+  for(const [d,v] of Object.entries(r.rates||{})) if(!bad(d) && /^\d{4}-\d{2}-\d{2}\|[A-Z]{6}$/.test(d) && typeof v==='number' && isFinite(v) && !DB.rates[d]) DB.rates[d]=v;
+  const st=cleanSettings(r.settings);
+  if(st){ const loc=DB.settings, newer=(st.upd||0)>(loc.upd||0), base=newer? st : loc, other=newer? loc : st;
+    const union=(a,b)=>{ if(!a && !b) return undefined; const ids=new Set((a||[]).map(x=>x.id)); return [...(a||[]), ...(b||[]).filter(x=>!ids.has(x.id))]; };
+    const cats=union(base.cats, other.cats), funds=union(base.funds, other.funds), next={...base};
+    if(cats) next.cats=cats; if(funds) next.funds=funds;
+    if(newer || JSON.stringify(next.cats)!==JSON.stringify(loc.cats) || JSON.stringify(next.funds)!==JSON.stringify(loc.funds)){
+      if(!newer) next.upd=Date.now();   // we added the other device's items: our copy is now the newest
+      DB.settings=next; applyTheme(); n++; } }
+  buildCats(); bump();   // entries from another device may use categories this one doesn't know yet
   return n;
+}
+/* Everything read from a backup file or Google Drive is checked field by field, so a damaged or tampered file
+   can't inject page code or break the app. */
+function safeId(x){ return typeof x==='string' && /^[A-Za-z0-9_-]{1,64}$/.test(x); }   // functions (hoisted) so the cleaners work when data is first loaded at start-up
+function isObj(o){ return !!o && typeof o==='object' && !Array.isArray(o); }
+function num(v){ return (typeof v==='number' && isFinite(v))? v : undefined; }
+function str(v,max=200){ return typeof v==='string'? v.slice(0,max) : undefined; }
+function cleanEntry(id, e){
+  if(!safeId(id) || !isObj(e) || typeof e.date!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date) || num(e.amt)===undefined) return null;
+  const o={id, date:e.date, amt:e.amt, cat:(typeof e.cat==='string' && /^[a-z0-9_-]{1,40}$/.test(e.cat))? e.cat : 'misc', upd:num(e.upd)||0, cr:num(e.cr)||num(e.upd)||0};
+  if(e.del===true) o.del=true;
+  for(const k of ['note','friend']) if(str(e[k])!==undefined) o[k]=str(e[k]);
+  for(const k of ['sub','pay','from','to']) if(typeof e[k]==='string' && (e[k]==='' || safeId(e[k]))) o[k]=e[k];
+  for(const k of ['cur','homeCur']) if(typeof e[k]==='string' && /^[A-Z]{3}$/.test(e[k])) o[k]=e[k];
+  for(const k of ['rate','inr']) if(num(e[k])!==undefined) o[k]=e[k];
+  for(const k of ['salaryFor','savingsFor']) if(typeof e[k]==='string' && /^\d{4}-\d{2}$/.test(e[k])) o[k]=e[k];
+  if(e.sample===true) o.sample=true;
+  if(isObj(e.emi) && num(e.emi.n)>1) o.emi={n:Math.min(36,Math.round(e.emi.n)), fee:Math.max(0,num(e.emi.fee)||0), start:(typeof e.emi.start==='string' && /^\d{4}-\d{2}$/.test(e.emi.start))? e.emi.start : undefined};
+  return o;
+}
+function cleanMonth(c){
+  if(!isObj(c)) return null;
+  const budgets={}; if(isObj(c.budgets)) for(const [k,v] of Object.entries(c.budgets)) if(/^[A-Za-z0-9_:-]{1,60}$/.test(k) && num(v)!==undefined && v>=0) budgets[k]=v;
+  const o={salary:Math.max(0,num(c.salary)||0), budgets, upd:num(c.upd)||0};
+  if(c.del===true) o.del=true; if(c.sample===true) o.sample=true;
+  if(Array.isArray(c.useIn)) o.useIn=c.useIn.filter(x=>typeof x==='string' && safeId(x));
+  if(num(c.opening)!==undefined) o.opening=c.opening;
+  for(const k of ['openingAuto']) if(typeof c[k]==='boolean') o[k]=c[k];
+  if(num(c.openingAt)!==undefined) o.openingAt=c.openingAt;
+  if(['skip','seen',true].includes(c.savingsDone)) o.savingsDone=c.savingsDone;
+  if(c.sampleBase===true) o.sampleBase=true;
+  return o;
+}
+function cleanSettings(x){
+  if(!isObj(x)) return null;
+  const o={upd:num(x.upd)||0, theme:['light','dark','auto'].includes(x.theme)? x.theme : 'auto'};
+  for(const k of ['trackBal','setupDone']) if(typeof x[k]==='boolean') o[k]=x[k];
+  if(num(x.layoutV)!==undefined) o.layoutV=x.layoutV;
+  if(Array.isArray(x.cats)) o.cats=x.cats.filter(okCat).slice(0,200).map(c=>({id:c.id, name:String(c.name).slice(0,40), icon:String(c.icon||'•').slice(0,8),
+    kind:CAT_KINDS[c.kind]? c.kind : 'living', hidden:c.hidden===true||undefined, reason:c.reason===true||undefined, send:c.send===true||undefined,
+    subs:Array.isArray(c.subs)? c.subs.filter(t=>isObj(t) && typeof t.id==='string' && safeId(t.id) && typeof t.name==='string').slice(0,12).map(t=>({id:t.id, name:t.name.slice(0,30), icon:String(t.icon||'•').slice(0,8)})) : undefined}));
+  if(Array.isArray(x.funds)) o.funds=x.funds.filter(f=>isObj(f) && typeof f.id==='string' && safeId(f.id) && typeof f.name==='string').slice(0,100).map(f=>{
+    const g={id:f.id, name:f.name.slice(0,40), icon:String(f.icon||'💰').slice(0,8), amt:num(f.amt)||0};
+    if(num(f.at)!==undefined) g.at=f.at; if(['bank','cash','wallet','card','credit'].includes(f.kind)) g.kind=f.kind;
+    for(const k of ['credit','hidden','ef']) if(f[k]===true) g[k]=true;
+    if(num(f.limit)!==undefined) g.limit=Math.max(0,f.limit); if(num(f.due)!==undefined) g.due=Math.min(28,Math.max(1,Math.round(f.due)));
+    if(typeof f.short==='string') g.short=f.short.slice(0,12);
+    return g; });
+  return o;
 }
 function slug(n){ return (n||'me').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'me'; }
 function syncFileName(){ return `pocket-budget-backup-${slug(curProfile().name)}-${todayStr()}.json`; }
 /* ============ Sync: Sign in with Google → a hidden app folder in the person's OWN Google Drive ============
    Uses the drive.appdata permission only: the app can see its own file and nothing else in your Drive,
    and nobody else (including whoever made the app) can see it. No server: the phone talks to Google directly. */
-const APP_VERSION='v2';
+const APP_VERSION='v3';
 const GOOGLE_CLIENT_ID = '1012295719275-2nhecb6mkicb2bqt0dmmuj6t09aojkjd.apps.googleusercontent.com';   // OAuth client (type: Web application) whose authorised origin + redirect is this page
 const G_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const G_API='https://www.googleapis.com/drive/v3', G_UP='https://www.googleapis.com/upload/drive/v3';
 const GSTATE='pocketBudget.gstate', GSILENT='pocketBudget.gsilent';
 const gKey = pid => 'pocketBudget.google.'+(pid||PROFILES.current);
-function gCfg(){ try{ const o=JSON.parse(localStorage.getItem(gKey())||'null'); return o && typeof o==='object' && !Array.isArray(o)? o : null; }catch(e){ return null; } }
-function gSave(o){ try{ localStorage.setItem(gKey(), JSON.stringify(o)); }catch(e){} }
-function gClear(){ try{ localStorage.removeItem(gKey()); }catch(e){} }
+function gCfg(pid){ try{ const o=JSON.parse(localStorage.getItem(gKey(pid))||'null'); return o && typeof o==='object' && !Array.isArray(o)? o : null; }catch(e){ return null; } }
+function gSave(o,pid){ try{ localStorage.setItem(gKey(pid), JSON.stringify(o)); }catch(e){} }
+function gClear(pid){ try{ const c=gCfg(pid); if(c && c.email) localStorage.setItem('pocketBudget.lastEmail.'+(pid||PROFILES.current), c.email); localStorage.removeItem(gKey(pid)); }catch(e){} }
+/* Each sync run belongs to one profile. Switching profile, signing out or erasing starts a new "generation":
+   any run still waiting on Google is dropped before it can merge or upload anything. */
+let syncGen=0, gCtx=null;
+function stopSync(){ syncGen++; cloudBusy=false; cloudAgain=false; cloudManualWait=false; clearTimeout(cloudTimer); if(gCtx){ gCtx.ctls.forEach(c=>{ try{ c.abort(); }catch(e){} }); gCtx=null; } }
 function cloudOn(){ return !!gCfg(); }
-function gTokenOk(){ const c=gCfg(); return !!(c && c.token && Date.now() < (+c.exp||0)-60000); }
+function gTokenOk(pid){ const c=gCfg(pid); return !!(c && c.token && Date.now() < (+c.exp||0)-60000); }
 let cloudErr='', cloudState='off', cloudBusy=false, cloudTimer=null, cloudAgain=false, cloudDirty=true, cloudManualWait=false, lblTimer=null, gVer=null, gFirst=true;
 function initSync(){ gVer=null; gFirst=true; cloudDirty=true; cloudState=cloudOn()? (gTokenOk()?'ok':'expired') : 'off'; renderSyncDot(); if(cloudOn() && gTokenOk()) cloudSync(false); }
 /* Sign-in: go to Google and come straight back with a short-lived token (1 hour). "state" proves the sign-in started here. */
 function gRedirect(o={}){
   if(!GOOGLE_CLIENT_ID){ toast('Google sign-in isn’t switched on in this copy of the app yet'); return; }
   if(!navigator.onLine){ toast('You’re offline. Connect to the internet to sign in.'); return; }
-  const st=uid()+uid()+uid();
+  const st=rndHex(24);
   try{ localStorage.setItem(GSTATE, JSON.stringify({st, pid:PROFILES.current, t:Date.now(), silent:!!o.silent, restore:!!o.restore})); }catch(e){}
   const p=new URLSearchParams({client_id:GOOGLE_CLIENT_ID, redirect_uri:location.origin+location.pathname, response_type:'token', scope:G_SCOPE, include_granted_scopes:'true', state:st});
   const c=gCfg(); if(c && c.email) p.set('login_hint', c.email);
@@ -2194,38 +2310,70 @@ function gTakeToken(){
   const tok=q.get('access_token')||'', exp=Math.min(7200, Math.max(60, parseInt(q.get('expires_in'))||3600)), sc=q.get('scope')||G_SCOPE;
   if(!/^[A-Za-z0-9._~+\/=-]{20,4096}$/.test(tok)) return {bad:true};
   if(!sc.includes('drive.appdata')) return {error:'no_drive'};
-  const c=gCfg()||{}; gSave({...c, email:c.email||'', token:tok, exp:Date.now()+exp*1000}); try{ localStorage.removeItem(GSILENT); }catch(e){}
-  return {ok:true, restore:!!sv.restore, first:!c.email};
+  const c=gCfg()||{}; let last=''; try{ last=localStorage.getItem('pocketBudget.lastEmail.'+PROFILES.current)||''; }catch(e){}
+  gSave({...c, prevEmail:c.email||last||'', email:c.email||'', token:tok, exp:Date.now()+exp*1000, check:!sv.silent}); try{ localStorage.removeItem(GSILENT); }catch(e){}
+  return {ok:true, restore:!!sv.restore, first:!c.email && !last};
 }
-async function gFetch(url, opt={}){
-  if(!gTokenOk()){ const e=new Error('Sign-in expired'); e.expired=true; throw e; }
-  const c=gCfg(), ctl=('AbortController' in window)? new AbortController() : null, t=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} }, 25000);
+async function gFetch(url, opt={}, cx){
+  const pid=cx? cx.pid : PROFILES.current;
+  if(!gTokenOk(pid)){ const e=new Error('Sign-in expired'); e.expired=true; throw e; }
+  const c=gCfg(pid), ctl=('AbortController' in window)? new AbortController() : null, t=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} }, 25000);
+  if(cx && ctl) cx.ctls.add(ctl);
   try{ const r=await fetch(url,{...opt, signal:ctl?ctl.signal:undefined, headers:{...(opt.headers||{}), Authorization:'Bearer '+c.token}});
-    if(r.status===401){ const x=gCfg(); if(x) gSave({...x, token:null, exp:0}); const e=new Error('Sign-in expired'); e.expired=true; throw e; }
+    if(r.status===401){ const x=gCfg(pid); if(x) gSave({...x, token:null, exp:0}, pid); const e=new Error('Sign-in expired'); e.expired=true; throw e; }
     if(!r.ok){ let m='Google Drive error '+r.status; try{ const j=await r.json(); if(j && j.error && j.error.message) m=j.error.message; }catch(_){} const e=new Error(m); e.status=r.status; throw e; }
     return r;
-  } finally{ clearTimeout(t); }
+  } finally{ clearTimeout(t); if(cx && ctl) cx.ctls.delete(ctl); }
 }
-function gFileName(){ return PROFILES.current==='default'? 'pocket-budget.json' : 'pocket-budget-'+slug(curProfile().name)+'.json'; }
-async function gWho(){ try{ const j=await (await gFetch(G_API+'/about?fields=user(emailAddress,displayName)')).json(); const c=gCfg(); if(c && j.user){ gSave({...c, email:String(j.user.emailAddress||'').slice(0,200), gname:String(j.user.displayName||'').slice(0,80)}); renderCloudStatus(); } }catch(e){} }
-async function gFindFile(){
-  const c=gCfg(); if(c && c.fileId) return c.fileId;
-  const q=encodeURIComponent(`name='${gFileName()}' and trashed=false`);
-  const j=await (await gFetch(`${G_API}/files?spaces=appDataFolder&q=${q}&fields=files(id,version,modifiedTime)&orderBy=modifiedTime desc&pageSize=10`)).json();
-  const id=(j.files && j.files[0] && j.files[0].id) || null; if(id) gSave({...gCfg(), fileId:id}); return id;
+/* Drive file for a profile. Fixed the first time it syncs (renaming the profile keeps the same file), unique on this
+   device, and works for names in any script (Hindi, Tamil, Chinese…). Same name on two phones → same file, so they sync. */
+function uslug(n){ const t=String(n||'').normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu,'-').replace(/^-+|-+$/g,'').slice(0,40);
+  return t || ('u'+[...String(n||'')].map(ch=>ch.codePointAt(0).toString(16)).join('').slice(0,30)) || 'me'; }
+function gFileName(pid){ pid=pid||PROFILES.current; if(pid==='default') return 'pocket-budget.json';
+  const p=PROFILES.list.find(x=>x.id===pid); if(!p) return 'pocket-budget-'+pid+'.json';
+  if(!p.syncName){ const used=new Set(['pocket-budget.json', ...PROFILES.list.filter(x=>x!==p && x.syncName).map(x=>x.syncName)]);
+    let base='pocket-budget-'+uslug(p.name), nm=base+'.json', k=2; while(used.has(nm)) nm=base+'-'+(k++)+'.json';
+    p.syncName=nm; saveProfiles(); }
+  return p.syncName; }
+async function gWho(){ try{ const j=await (await gFetch(G_API+'/about?fields=user(emailAddress,displayName)')).json(); const c=gCfg(); if(c && j.user){ const email=String(j.user.emailAddress||'').slice(0,200); gSave({...c, email, gname:String(j.user.displayName||'').slice(0,80)}); renderCloudStatus(); return email; } }catch(e){} return null; }
+/* After an interactive sign-in: if this profile was backed up to a different Google account, ask before copying anything there */
+async function gConfirmAccount(){
+  const c=gCfg(); if(!c || !c.check) return true;
+  const who=await gWho(); const x=gCfg(); if(!x) return false;
+  if(!who){ return !x.prevEmail; }   // couldn't check: only carry on if there was no earlier account
+  const prev=(x.prevEmail||'').toLowerCase();
+  if(prev && prev!==who.toLowerCase()){
+    gSave({...x, fileId:null, hold:true, check:false}); gVer=null; gFirst=true;
+    openSheet(`<div class="sheettop"><h3>Different Google account</h3><button class="btn sm" id="gaClose">Close</button></div>
+      <div class="small" style="margin-top:8px">This profile was backed up to <b>${esc(x.prevEmail)}</b>, but you signed in as <b>${esc(who)}</b>.</div>
+      <div class="small muted" style="margin-top:6px">If you continue, this profile's data will be saved in ${esc(who)}'s Google Drive (and merged with anything already there for this profile).</div>
+      <div class="btns" style="margin-top:12px"><button class="btn primary" id="gaUse">Use ${esc(who)}</button><button class="btn" id="gaOut">Sign out</button></div>`);
+    $('#gaUse').onclick=()=>{ const y=gCfg(); if(y){ gSave({...y, hold:false, prevEmail:''}); } closeSheet(); initSync(); toast('Syncing with '+who); };
+    $('#gaOut').onclick=()=>{ closeSheet(); gSignOut(false); };
+    $('#gaClose').onclick=()=>closeSheet();
+    renderCloudStatus(); return false; }
+  gSave({...x, prevEmail:'', check:false}); return true;
 }
-async function gCreate(body){
-  const meta={name:gFileName(), parents:['appDataFolder'], mimeType:'application/json'}, bd='pb'+uid();
+async function gFindFile(cx){
+  const pid=cx? cx.pid : PROFILES.current, c=gCfg(pid); if(c && c.fileId) return c.fileId;
+  const q=encodeURIComponent(`name='${gFileName(pid).replace(/['\\]/g,'')}' and trashed=false`);
+  const j=await (await gFetch(`${G_API}/files?spaces=appDataFolder&q=${q}&fields=files(id,version,modifiedTime)&orderBy=modifiedTime desc&pageSize=10`,{},cx)).json();
+  const id=(j.files && j.files[0] && j.files[0].id) || null; if(id && (!cx || cx.alive())) gSave({...gCfg(pid), fileId:id}, pid); return id;
+}
+async function gCreate(body, cx){
+  const pid=cx? cx.pid : PROFILES.current;
+  const meta={name:gFileName(pid), parents:['appDataFolder'], mimeType:'application/json'}, bd='pb'+rndHex(8);
   const data=`--${bd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`;
-  const j=await (await gFetch(`${G_UP}/files?uploadType=multipart&fields=id,version`,{method:'POST', headers:{'Content-Type':'multipart/related; boundary='+bd}, body:data})).json();
-  gSave({...gCfg(), fileId:j.id}); return j;
+  const j=await (await gFetch(`${G_UP}/files?uploadType=multipart&fields=id,version`,{method:'POST', headers:{'Content-Type':'multipart/related; boundary='+bd}, body:data},cx)).json();
+  gSave({...gCfg(pid), fileId:j.id}, pid); return j;
 }
-const gUpload = async (id, body) => (await gFetch(`${G_UP}/files/${encodeURIComponent(id)}?uploadType=media&fields=id,version`,{method:'PATCH', headers:{'Content-Type':'application/json'}, body})).json();
-const gMeta = async id => (await gFetch(`${G_API}/files/${encodeURIComponent(id)}?fields=id,version`)).json();
-const gDownload = async id => (await gFetch(`${G_API}/files/${encodeURIComponent(id)}?alt=media`,{cache:'no-store'})).json();
+const gUpload = async (id, body, cx) => (await gFetch(`${G_UP}/files/${encodeURIComponent(id)}?uploadType=media&fields=id,version`,{method:'PATCH', headers:{'Content-Type':'application/json'}, body},cx)).json();
+const gMeta = async (id, cx) => (await gFetch(`${G_API}/files/${encodeURIComponent(id)}?fields=id,version`,{},cx)).json();
+const gDownload = async (id, cx) => (await gFetch(`${G_API}/files/${encodeURIComponent(id)}?alt=media`,{cache:'no-store'},cx)).json();
 /* A new device with nothing logged takes the saved data as it is (settings, categories, currency) */
 function adoptAndMerge(r){
   if(!r || typeof r!=='object') return 0;
+  if(typeof r.syncFile==='string' && r.syncFile!==gFileName()) throw new Error('this Drive file belongs to a different profile');
   const fresh=!Object.values(DB.entries).some(e=>!e.del);
   if(fresh){ const p=curProfile();
     if(typeof r.currency==='string' && CURRENCIES[r.currency]) p.currency=r.currency;
@@ -2239,54 +2387,61 @@ function syncLabel(txt, busy){ const b=$('#syncBtn'), l=$('#syncLbl'); if(!b||!l
 function showLast(){ const el=$('#cLast'); if(el) el.textContent=DB.meta.lastCloud? new Date(DB.meta.lastCloud).toLocaleString('en-SG') : 'not yet'; }
 async function cloudSync(manual, poll){
   if(!cloudOn()){ if(manual){ toast('Sign in with Google to sync'); go('settings'); } return false; }
+  if(gCfg().hold){ if(manual) toast('Choose which Google account to use first (Settings → Sync)'); return false; }
   if(!gTokenOk()){ cloudState='expired'; renderSyncDot(); renderCloudStatus(); if(manual) gRedirect({}); return false; }
   if(cloudBusy){ if(manual){ cloudManualWait=true; syncLabel('Syncing…',true); } else if(!poll) cloudAgain=true; return false; }
   cloudBusy=true; cloudAgain=false; if(manual) syncLabel('Syncing…',true);
+  const gen=++syncGen, pid=PROFILES.current, db=DB;
+  const cx={pid, ctls:new Set(), alive:()=>gen===syncGen && PROFILES.current===pid && DB===db}; gCtx=cx;
+  const check=()=>{ if(!cx.alive()){ const e=new Error('stale'); e.stale=true; throw e; } };
   const dirty=cloudDirty||manual; cloudDirty=false; let n=0;
   try{
-    let id=await gFindFile(), m=null;
-    if(id){ try{ m=await gMeta(id); }catch(e){ if(e.status===404){ gSave({...gCfg(), fileId:null}); id=null; } else throw e; } }
-    if(!id){ const j=await gCreate(JSON.stringify(exportObj())); gVer=j.version||null; }
+    let id=await gFindFile(cx), m=null; check();
+    if(id){ try{ m=await gMeta(id,cx); }catch(e){ if(e.status===404){ check(); gSave({...gCfg(pid), fileId:null}, pid); id=null; } else throw e; } check(); }
+    if(!id){ const j=await gCreate(JSON.stringify(exportObj()),cx); check(); gVer=j.version||null; }
     else{
-      if(m.version!==gVer){ n+=adoptAndMerge(await gDownload(id)); gVer=m.version; }
-      if(dirty || gFirst){ const m2=await gMeta(id); if(m2.version!==gVer){ n+=adoptAndMerge(await gDownload(id)); }
-        const u=await gUpload(id, JSON.stringify(exportObj())); gVer=u.version||null; }
+      if(m.version!==gVer){ const r=await gDownload(id,cx); check(); n+=adoptAndMerge(r); gVer=m.version; }
+      if(dirty || gFirst){ const u=await gUpload(id, JSON.stringify(exportObj()),cx); check(); gVer=u.version||null; }   // the check just above already merged anything newer
     }
-    gFirst=false; const was=cloudState; cloudState='ok'; DB.meta.lastCloud=Date.now(); persist();
+    gFirst=false; const was=cloudState; cloudState='ok'; DB.meta.lastCloud=Date.now(); try{ localStorage.setItem(KEY+'.lastCloud', String(DB.meta.lastCloud)); }catch(e){} if(n) persist();
     if(n){ try{ cleanupFunds(); ensureOpening(); }catch(e){} render(); maybeWizard(); }
     else if(was!=='ok'){ renderSyncDot(); if(S.tab==='settings') renderCloudStatus(); } else { renderSyncDot(); showLast(); }
     if(manual){ syncLabel('Synced ✓'); toast(n? `Synced · ${n} update${n===1?'':'s'} from your other devices` : 'Synced — everything is up to date'); }
     else if(n && !poll) toast(`Updated · ${n} change${n===1?'':'s'} from Google Drive`);
     else if(n) toast(`Updated · ${n} change${n===1?'':'s'} from your other device`);
     return true;
-  }catch(e){ if(dirty) cloudDirty=true;
+  }catch(e){
+    if(e.stale || (e.name==='AbortError' && !cx.alive())) return false;   // this run belonged to a profile that's no longer open
+    if(dirty) cloudDirty=true;
     if(e.expired) cloudState='expired'; else { cloudErr = e.name==='AbortError'? 'no response' : (e.message||String(e)); cloudState='err'; }
     renderSyncDot(); renderCloudStatus();
     if(manual){ syncLabel('Sync'); if(e.expired) gRedirect({}); else toast('Sync failed ('+(e.name==='AbortError'?'no response, check internet':cloudErr)+'). It will retry automatically.'); }
     return false; }
-  finally{ cloudBusy=false;
+  finally{ if(gen===syncGen){ cloudBusy=false; gCtx=null;
     if(cloudManualWait){ cloudManualWait=false; setTimeout(()=>cloudSync(true),50); }
-    else if(cloudAgain){ cloudAgain=false; setTimeout(()=>cloudSync(false),200); } }
+    else if(cloudAgain){ cloudAgain=false; setTimeout(()=>cloudSync(false),200); } } }
 }
-function scheduleCloud(){ if(!cloudOn()) return; cloudDirty=true; if(!gTokenOk()){ cloudState='expired'; renderSyncDot(); return; } clearTimeout(cloudTimer); cloudTimer=setTimeout(()=>cloudSync(false),800); }
+function scheduleCloud(){ if(!cloudOn()) return; cloudDirty=true; if(!gTokenOk()){ cloudState='expired'; renderSyncDot(); return; } clearTimeout(cloudTimer); cloudTimer=setTimeout(()=>cloudSync(false),3000); }
 function scheduleSync(){ scheduleCloud(); renderSyncDot(); }
 setInterval(()=>{ if(cloudOn() && gTokenOk() && document.visibilityState==='visible') cloudSync(false,true); }, 10000);
 window.addEventListener('online',()=>{ if(cloudOn() && gTokenOk()) cloudSync(false); });
 /* After start-up: use a fresh token, or refresh an expired one by visiting Google and coming straight back (at most every 10 minutes) */
-function gStartup(res){
+async function gStartup(res){
   if(res && res.bad) setTimeout(()=>toast('That sign-in link was ignored. Sign in from Settings → Sync.'),600);
   if(res && res.error){ if(res.silent){ cloudState='expired'; } else setTimeout(()=>toast(res.error==='access_denied'? 'Sign-in cancelled' : res.error==='no_drive'? 'Pocket Budget needs the Google Drive permission to save your data' : 'Google sign-in didn’t work ('+res.error+')'),600); }
   if(!cloudOn()){ renderSyncDot(); return; }
-  if(gTokenOk()){ initSync(); if(res && res.ok){ if(!gCfg().email) gWho(); if(res.first) setTimeout(()=>toast('Signed in. Your data now saves to your Google Drive.'),900); } return; }
+  if(gTokenOk()){ if(res && res.ok){ gConfirmAccount().then(ok=>{ if(!ok) return; initSync(); if(res.first) setTimeout(()=>toast('Signed in. Your data now saves to your Google Drive.'),900); }); return; }
+    if(gCfg().check){ gConfirmAccount().then(ok=>{ if(ok) initSync(); }); return; }
+    initSync(); return; }
   let last=0; try{ last=+localStorage.getItem(GSILENT)||0; }catch(e){}
   if(GOOGLE_CLIENT_ID && navigator.onLine && Date.now()-last>10*60000 && !(res && res.error) && !document.body.classList.contains('locked')){ try{ localStorage.setItem(GSILENT, String(Date.now())); }catch(e){} gRedirect({silent:true}); return; }
   cloudState='expired'; renderSyncDot();
 }
 async function gSignOut(alsoDelete){
   const c=gCfg();
-  if(alsoDelete){ try{ const id=await gFindFile(); if(id) await gFetch(`${G_API}/files/${encodeURIComponent(id)}`,{method:'DELETE'}); }catch(e){ if(!e.expired){ toast('Couldn’t delete it from Drive ('+(e.message||e)+')'); return; } toast('Sign in again first, then delete'); gRedirect({}); return; } }
+  if(alsoDelete){ stopSync(); try{ const id=await gFindFile(); if(id) await gFetch(`${G_API}/files/${encodeURIComponent(id)}`,{method:'DELETE'}); }catch(e){ if(!e.expired){ toast('Couldn’t delete it from Drive ('+(e.message||e)+')'); return; } toast('Sign in again first, then delete'); gRedirect({}); return; } }
   if(c && c.token){ try{ fetch('https://oauth2.googleapis.com/revoke',{method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(c.token)}).catch(()=>{}); }catch(e){} }
-  gClear(); cloudState='off'; gVer=null; render(); toast(alsoDelete? 'Deleted from your Google Drive and signed out. Your data is still on this device.' : 'Signed out. Your data stays on this device.');
+  stopSync(); gClear(); cloudState='off'; gVer=null; gFirst=true; render(); toast(alsoDelete? 'Deleted from your Google Drive and signed out. Your data is still on this device.' : 'Signed out. Your data stays on this device.');
 }
 const gButton = (id, label) => `<button class="gbtn" id="${id}"><svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.6c0-1.6-.1-3.1-.4-4.6H24v9h12.4c-.5 2.9-2.2 5.3-4.6 7l7.4 5.7c4.3-4 6.9-9.9 6.9-17.1z"/><path fill="#FBBC05" d="M10.5 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.6 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.7c-2.1 1.4-4.8 2.3-8.5 2.3-6.3 0-11.6-4.2-13.5-9.9l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg><span>${label}</span></button>`;
 function renderSyncDot(){
@@ -2333,18 +2488,29 @@ async function exportSyncFile(){
   download(blob,syncFileName());
 }
 function download(blob,name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},500); }
+function csvMonth(ym){
+  const es=[...monthEntries(ym), ...Object.values(DB.entries).filter(e=>!e.del && CAT[e.cat]?.track && e.date.startsWith(ym))];
+  return es.sort((a,b)=>a.date.localeCompare(b.date)||(a.cr||0)-(b.cr||0));
+}
 function exportCSV(ym){
-  const es = Object.values(DB.entries).filter(e=>!e.del && (!ym||e.date.startsWith(ym))).sort((a,b)=>a.date.localeCompare(b.date));
-  const q=v=>{ v=String(v??''); if(/^[=+\-@\t\r]/.test(v) && !/^-?\d/.test(v)) v="'"+v;   // stop spreadsheet formulas in notes
+  let months=[ym];
+  if(!ym){ const set=new Set(); for(const e of Object.values(DB.entries)){ if(e.del) continue; set.add(e.date.slice(0,7)); if(isEmi(e)) for(const p of emiPlan(e)) set.add(p.ym); } months=[...set].sort(); }
+  const es=months.flatMap(csvMonth);
+  const q=v=>{ v=String(v??''); if(/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v="'"+v;   // stop spreadsheet formulas in notes
     return /[",\n]/.test(v)? '"'+v.replace(/"/g,'""')+'"' : v; };
-  const rows=[['Date','Category','Type','Amount '+curCode(),'Amount sent home','Home currency','Rate','Note','Paid with / account']].concat(es.map(e=>[e.date,e.cat==='refund'?'Refund':(CAT[e.cat]?.name||e.cat),subOf(e)?.name||'',(CAT[e.cat]?.income?-e.amt:e.amt).toFixed(2),isSendCat(e.cat)?(e.inr||''):'',isSendCat(e.cat)?(e.homeCur||''):'',isSendCat(e.cat)?(e.rate||''):'',e.note||'',e.cat==='xfer'?(fundName(e.from)||'Outside')+' → '+fundName(e.to):fundName(e.pay)]));
+  const sign=e=>(CAT[e.cat]?.income || e.cat==='borrowed')? -1 : 1;
+  const note=e=>[e.inst?'EMI '+e.inst.k+'/'+e.inst.n:'', e.emiOrig?'Bought on EMI ('+sgd(e.emiOrig)+', counted in monthly instalments)':'', e.friend?e.friend:'', e.note||''].filter(Boolean).join(' · ');
+  const rows=[['Date','Category','Type','Amount '+curCode(),'Amount sent home','Home currency','Rate','Note','Paid with / account']].concat(es.map(e=>[e.date,e.cat==='refund'?'Refund':(CAT[e.cat]?.name||e.cat),subOf(e)?.name||'',(sign(e)*e.amt).toFixed(2),isSendCat(e.cat)?(e.inr||''):'',isSendCat(e.cat)?(e.homeCur||''):'',isSendCat(e.cat)?(e.rate||''):'',note(e),e.cat==='xfer'?(fundName(e.from)||'Outside')+' → '+fundName(e.to):fundName(e.pay)]));
   download(new Blob(['﻿'+rows.map(r=>r.map(q).join(',')).join('\n')],{type:'text/csv'}), `pocket-budget-${slug(curProfile().name)}-${ym||'all'}.csv`);
 }
 
 /* ============ Profiles ============ */
 const AV_COLORS = ['#2a78d6','#1baf7a','#eb6834','#4a3aa7','#e34948','#008300','#c98500','#d55181'];
 const avatar = (p,lg) => `<span class="av${lg?' lg':''}" style="background:${AV_COLORS[(p.color||0)%AV_COLORS.length]}">${esc((p.name||'?').trim().charAt(0).toUpperCase()||'?')}</span>`;
-async function hashPin(pin, salt){
+async function hashPin(pin, salt, kdf){
+  if(kdf==='pbkdf2'){ const k=await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+    const bits=await crypto.subtle.deriveBits({name:'PBKDF2', hash:'SHA-256', salt:new TextEncoder().encode(salt), iterations:200000}, k, 256);
+    return [...new Uint8Array(bits)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
   const data = new TextEncoder().encode(salt+':'+pin);
   try{ const d = await crypto.subtle.digest('SHA-256', data); return [...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
   catch(e){ let h=0; for(const c of data) h=(h*31+c)>>>0; return 'x'+h.toString(16); }
@@ -2360,7 +2526,9 @@ function profileSheet(){
     <div class="btns" style="margin-top:12px"><button class="btn primary" id="pAdd">+ Add profile</button></div>`;
   openSheet(h);
   document.querySelectorAll('.prow').forEach(r=>r.onclick=ev=>{ if(ev.target.closest('[data-pedit]')) return; switchProfile(r.dataset.pid); });
-  document.querySelectorAll('[data-pedit]').forEach(b=>b.onclick=ev=>{ ev.stopPropagation(); editProfile(b.dataset.pedit); });
+  document.querySelectorAll('[data-pedit]').forEach(b=>b.onclick=async ev=>{ ev.stopPropagation(); const p=PROFILES.list.find(x=>x.id===b.dataset.pedit);
+    if(p && p.pin && (p.id!==PROFILES.current || document.body.classList.contains('locked')) && !(await askPin(p))) return;   // can't remove or change someone's PIN without it
+    editProfile(b.dataset.pedit); });
   $('#pAdd').onclick=()=>editProfile(null);
 }
 function editProfile(id){
@@ -2391,15 +2559,17 @@ function editProfile(id){
     let target = p;
     if(!target){ target={id:'p'+uid(), name, color:PROFILES.list.length}; PROFILES.list.push(target); }
     target.name=name; target.currency=cur; if(home && home!==cur) target.homeCur=home; else delete target.homeCur;
-    if(pin){ target.salt=uid(); target.pin=await hashPin(pin,target.salt); }
+    if(pin){ target.salt=rndHex(16); target.kdf='pbkdf2'; target.pin=await hashPin(pin,target.salt,'pbkdf2'); }
     saveProfiles(); renderProfileBtn();
     if(!p){ toast(`Profile "${name}" created`); switchProfile(target.id, true); }
     else { toast('Profile saved'); profileSheet(); if(id===PROFILES.current) render(); }
   };
-  if($('#pNoPin')) $('#pNoPin').onclick=()=>{ delete p.pin; delete p.salt; saveProfiles(); toast('PIN removed'); profileSheet(); };
+  if($('#pNoPin')) $('#pNoPin').onclick=()=>{ delete p.pin; delete p.salt; delete p.kdf; saveProfiles(); toast('PIN removed'); profileSheet(); };
   if($('#pDel')) confirmBtn($('#pDel'),`Tap again to delete ${p.name} and all their data here`,async()=>{
+    try{ const g=JSON.parse(localStorage.getItem(gKey(p.id))||'null'); if(g && g.token) fetch('https://oauth2.googleapis.com/revoke',{method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(g.token)}).catch(()=>{}); }catch(e){}
     try{ localStorage.removeItem(keyFor(p.id)); localStorage.removeItem(gKey(p.id)); }catch(e){}
     await idb.del(syncKeyFor(p.id));
+    if(p.id===PROFILES.current) stopSync();
     PROFILES.list = PROFILES.list.filter(x=>x.id!==p.id);
     const wasCurrent = PROFILES.current===p.id;
     saveProfiles(); toast(`Deleted ${p.name}`);
@@ -2415,6 +2585,7 @@ async function switchProfile(id, skipPin){
   clearTimeout(syncTimer);
   document.body.classList.remove('locked');
   PROFILES.current = id; saveProfiles();
+  stopSync();
   KEY = keyFor(id); DB = loadDB(); buildCats(); applyTheme(); closeWizard();
   SH = null; syncState='none';
   Object.assign(S, {ym:curYM(), tab:'home', histCat:'all', selDay:null, lastCat:null});
@@ -2438,7 +2609,7 @@ function askPin(p, blocking){
       if(k==='b'){ val=val.slice(0,-1); draw(); return; }
       if(val.length>=4) return;
       val+=k; draw();
-      if(val.length===4){ const h = await hashPin(val,p.salt); if(h===p.pin) finish(true); else { val=''; draw('Wrong PIN — try again'); } }
+      if(val.length===4){ const h = await hashPin(val,p.salt,p.kdf); if(h===p.pin) finish(true); else { val=''; draw('Wrong PIN — try again'); } }
     };
     const kd = ev => { if(/^\d$/.test(ev.key)) key(ev.key); else if(ev.key==='Backspace') key('b'); else if(ev.key==='Escape' && !blocking) key('x'); };
     document.addEventListener('keydown', kd);
@@ -2499,7 +2670,7 @@ function loadSample(){
 function removeSample(){
   const now=Date.now();
   for(const e of Object.values(DB.entries)) if(e.sample && !e.del){ e.del=true; e.upd=now; }
-  for(const [k,m] of Object.entries(DB.months)) if(m.sample) DB.months[k]={salary:0,budgets:{},upd:now,del:true};
+  for(const [k,m] of Object.entries(DB.months)){ if(m.sample) DB.months[k]={salary:0,budgets:{},upd:now,del:true}; else if(m.sampleBase){ const o={...m, salary:0, budgets:{}, upd:now}; delete o.sampleBase; DB.months[k]=o; } }
   save();
 }
 
@@ -2515,15 +2686,15 @@ $('#mLabel').onclick=()=>calSheet();
 $('#profBtn').onclick=profileSheet;
 $('#mPrev').onclick=()=>{ S.ym=addMonths(S.ym,-1); render(); };
 $('#mNext').onclick=()=>{ S.ym=addMonths(S.ym,1); render(); };
-document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ if(cloudOn() && gTokenOk()) cloudSync(false); else renderSyncDot(); render(); } });
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden' && cloudDirty && cloudOn() && gTokenOk()){ clearTimeout(cloudTimer); cloudSync(false); } if(document.visibilityState==='visible'){ if(cloudOn() && gTokenOk()) cloudSync(false); else renderSyncDot(); render(); } });
 let _rs; window.addEventListener('resize',()=>{ clearTimeout(_rs); _rs=setTimeout(()=>{ if(S.tab==='analysis') renderAnalysis(); },200); });
-window.addEventListener('storage',ev=>{ if(ev.key===KEY){ DB=loadDB(); buildCats(); render(); } else if(ev.key===PKEY){ PROFILES=loadProfiles(); renderProfileBtn(); } });
+window.addEventListener('storage',ev=>{ if(ev.key===KEY){ DB=loadDB(); buildCats(); render(); } else if(ev.key===PKEY){ const P=loadProfiles(); if(P.list.some(p=>p.id===PROFILES.current)) P.current=PROFILES.current; PROFILES=P; renderProfileBtn(); } });   // each tab keeps its own profile
 const G_RET = gTakeToken();   // back from Google sign-in? (runs before anything touches history)
 try{ if(localStorage.getItem('pocketBudget.hideOnOpen')!=='0') localStorage.setItem('pocketBudget.showBal','0'); }catch(e){}
 applyTheme();
 renderProfileBtn();
 try{ cleanupFunds(); ensureOpening(); }catch(e){}
-render();
+try{ render(); }catch(e){ console.error(e); toast('Something in your data couldn’t be shown. Try Settings → Merge from a backup file, or contact support.'); }
 maybeWizard();
 
 /* Back button: closes an open sheet; from Calendar/Analysis/Budget/Settings goes to Home, and the next back closes the app.
@@ -2540,11 +2711,10 @@ maybeWizard();
     setTimeout(()=>{ if(Date.now()-exitT>=1900) guard(); },2000);
   });
 })();
-gStartup(G_RET);
-startupLock();
+(async()=>{ await startupLock(); gStartup(G_RET); })();   // PIN first, then Google
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   const hadSW = !!navigator.serviceWorker.controller; let reloaded=false;
-  navigator.serviceWorker.register('sw.js').then(r=>{ try{ r.update().catch(()=>{}); }catch(e){} }).catch(()=>{});
+  navigator.serviceWorker.register('sw.js',{scope:'./'}).then(r=>{ try{ r.update().catch(()=>{}); }catch(e){} }).catch(()=>{});
   navigator.serviceWorker.addEventListener('controllerchange',()=>{ if(hadSW && !reloaded){ reloaded=true; location.reload(); } });
 }
 </script>
