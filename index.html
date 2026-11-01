@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#0A0A0C">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://www.googleapis.com https://oauth2.googleapis.com https://api.frankfurter.dev https://api.frankfurter.app https://open.er-api.com; object-src 'none'; base-uri 'self'; form-action 'none'; manifest-src 'self'; worker-src 'self'">
 <meta name="referrer" content="no-referrer">
+<script>if(window.top!==window.self){ try{ window.top.location=window.self.location; }catch(e){ document.documentElement.innerHTML=""; } }</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif&amp;family=Inter+Tight:wght@400;500;600;700&amp;family=Fraunces:opsz,wght@9..144,300;9..144,500&amp;family=Manrope:wght@400;500;600;700;800&amp;family=Sora:wght@400;600;700&amp;family=Inter:wght@400;500;600;700&amp;display=swap">
@@ -952,7 +953,8 @@ function loadDB(){
       for(const [m,c] of Object.entries(d.months||{})){ if(/^\d{4}-\d{2}$/.test(m)){ const v=cleanMonth(c); if(v) db.months[m]=v; } }
       for(const [k,v] of Object.entries(d.rates||{})) if(/^\d{4}-\d{2}-\d{2}\|[A-Z]{6}$/.test(k) && typeof v==='number') db.rates[k]=v;
       db.settings=cleanSettings(d.settings)||db.settings;
-      if(d.meta && typeof d.meta==='object') for(const k of ['lastCloud','lastManual','lastRate','lastRatePair']) if(['number','string'].includes(typeof d.meta[k])) db.meta[k]=d.meta[k];
+      if(d.meta && typeof d.meta==='object') for(const k of ['lastCloud','lastManual','lastRate']) if(typeof d.meta[k]==='number' && isFinite(d.meta[k])) db.meta[k]=d.meta[k];
+      if(typeof d.meta.lastRatePair==='string' && /^[A-Z]{6}$/.test(d.meta.lastRatePair)) db.meta.lastRatePair=d.meta.lastRatePair;
       const lc=+localStorage.getItem(KEY+'.lastCloud')||0; if(lc>(db.meta.lastCloud||0)) db.meta.lastCloud=lc;
     }
     return db; } }catch(e){}
@@ -1563,9 +1565,9 @@ async function fetchRateNet(date, base, to, today, key){
     `https://api.frankfurter.app/${tag}?from=${base}&to=${to}`
   ];
   for(const u of urls){
-    try{ const r = await fetch(u,{cache:'no-store'}); if(r.ok){ const j = await r.json(); const v = j?.rates?.[to]; if(v){ if(date<today){ DB.rates[key]=v; persist(); } DB.meta.lastRate=v; DB.meta.lastRatePair=base+to; return v; } } }catch(e){}
+    try{ const r = await fetch(u,{cache:'no-store'}); if(r.ok){ const j = await r.json(); const v = j?.rates?.[to]; if(typeof v==='number' && isFinite(v) && v>0){ if(date<today){ DB.rates[key]=v; persist(); } DB.meta.lastRate=v; DB.meta.lastRatePair=base+to; return v; } } }catch(e){}
   }
-  try{ const r = await fetch('https://open.er-api.com/v6/latest/'+base); if(r.ok){ const j=await r.json(); const v=j?.rates?.[to]; if(v){ DB.meta.lastRate=v; DB.meta.lastRatePair=base+to; return v; } } }catch(e){}
+  try{ const r = await fetch('https://open.er-api.com/v6/latest/'+base); if(r.ok){ const j=await r.json(); const v=j?.rates?.[to]; if(typeof v==='number' && isFinite(v) && v>0){ DB.meta.lastRate=v; DB.meta.lastRatePair=base+to; return v; } } }catch(e){}
   return null;
 }
 
@@ -2686,13 +2688,14 @@ function merge(r, cloud){
 }
 /* Everything read from a backup file or Google Drive is checked field by field, so a damaged or tampered file
    can't inject page code or break the app. */
-function safeId(x){ return typeof x==='string' && /^[A-Za-z0-9_-]{1,64}$/.test(x); }   // functions (hoisted) so the cleaners work when data is first loaded at start-up
+function safeId(x){ return typeof x==='string' && /^[A-Za-z0-9_-]{1,64}$/.test(x) && x!=='__proto__' && x!=='constructor' && x!=='prototype'; }
+function capT(v){ return (typeof v==='number' && isFinite(v))? Math.min(v, Date.now()+86400000) : 0; }   // a tampered file can't pin itself with a far-future timestamp   // functions (hoisted) so the cleaners work when data is first loaded at start-up
 function isObj(o){ return !!o && typeof o==='object' && !Array.isArray(o); }
 function num(v){ return (typeof v==='number' && isFinite(v))? v : undefined; }
 function str(v,max=200){ return typeof v==='string'? v.slice(0,max) : undefined; }
 function cleanEntry(id, e){
   if(!safeId(id) || !isObj(e) || typeof e.date!=='string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date) || num(e.amt)===undefined) return null;
-  const o={id, date:e.date, amt:e.amt, cat:(typeof e.cat==='string' && /^[a-z0-9_-]{1,40}$/.test(e.cat))? e.cat : 'misc', upd:num(e.upd)||0, cr:num(e.cr)||num(e.upd)||0};
+  const o={id, date:e.date, amt:e.amt, cat:(typeof e.cat==='string' && /^[a-z0-9_-]{1,40}$/.test(e.cat))? e.cat : 'misc', upd:capT(e.upd), cr:capT(e.cr)||capT(e.upd)};
   if(e.del===true) o.del=true;
   for(const k of ['note','friend']) if(str(e[k])!==undefined) o[k]=str(e[k]);
   for(const k of ['sub','pay','from','to']) if(typeof e[k]==='string' && (e[k]==='' || safeId(e[k]))) o[k]=e[k];
@@ -2705,8 +2708,8 @@ function cleanEntry(id, e){
 }
 function cleanMonth(c){
   if(!isObj(c)) return null;
-  const budgets={}; if(isObj(c.budgets)) for(const [k,v] of Object.entries(c.budgets)) if(/^[A-Za-z0-9_:-]{1,60}$/.test(k) && num(v)!==undefined && v>=0) budgets[k]=v;
-  const o={salary:Math.max(0,num(c.salary)||0), budgets, upd:num(c.upd)||0};
+  const budgets={}; if(isObj(c.budgets)) for(const [k,v] of Object.entries(c.budgets)) if(/^[A-Za-z0-9_:-]{1,60}$/.test(k) && !['__proto__','constructor','prototype'].includes(k) && num(v)!==undefined && v>=0) budgets[k]=v;
+  const o={salary:Math.max(0,num(c.salary)||0), budgets, upd:capT(c.upd)};
   if(c.del===true) o.del=true; if(c.sample===true) o.sample=true;
   if(Array.isArray(c.useIn)) o.useIn=c.useIn.filter(x=>typeof x==='string' && safeId(x));
   if(num(c.opening)!==undefined) o.opening=c.opening;
@@ -2718,7 +2721,7 @@ function cleanMonth(c){
 }
 function cleanSettings(x){
   if(!isObj(x)) return null;
-  const o={upd:num(x.upd)||0, theme:['light','dark','auto'].includes(x.theme)? x.theme : 'auto'};
+  const o={upd:capT(x.upd), theme:['light','dark','auto'].includes(x.theme)? x.theme : 'auto'};
   for(const k of ['trackBal','setupDone']) if(typeof x[k]==='boolean') o[k]=x[k];
   if(num(x.layoutV)!==undefined) o.layoutV=x.layoutV;
   if(Array.isArray(x.cats)) o.cats=x.cats.filter(okCat).slice(0,200).map(c=>({id:c.id, name:String(c.name).slice(0,40), icon:String(c.icon||'•').slice(0,8),
@@ -2738,7 +2741,7 @@ function syncFileName(){ return `pocket-budget-backup-${slug(curProfile().name)}
 /* ============ Sync: Sign in with Google → a hidden app folder in the person's OWN Google Drive ============
    Uses the drive.appdata permission only: the app can see its own file and nothing else in your Drive,
    and nobody else (including whoever made the app) can see it. No server: the phone talks to Google directly. */
-const APP_VERSION='v4';
+const APP_VERSION='v5';
 const GOOGLE_CLIENT_ID = '1012295719275-2nhecb6mkicb2bqt0dmmuj6t09aojkjd.apps.googleusercontent.com';   // OAuth client (type: Web application) whose authorised origin + redirect is this page
 const G_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const G_API='https://www.googleapis.com/drive/v3', G_UP='https://www.googleapis.com/upload/drive/v3';
@@ -2942,6 +2945,7 @@ function renderCloudStatus(){
 $('#syncBtn').onclick=()=>{ if(!cloudOn()) go('settings'); else if(!gTokenOk()) gRedirect({}); else cloudSync(true); };
 $('#fileIn').onchange=async ev=>{
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+  if(f.size>20*1024*1024){ toast('That file is too big to be a Pocket Budget backup'); return; }
   try{ const n=merge(JSON.parse(await f.text())); DB.meta.lastManual=Date.now(); save(); toast(`Merged · ${n} update${n===1?'':'s'}`); render(); maybeWizard(); }
   catch(e){ toast('Could not read file: '+e.message); }
 };
@@ -2963,7 +2967,7 @@ function exportCSV(ym){
   let months=[ym];
   if(!ym){ const set=new Set(); for(const e of Object.values(DB.entries)){ if(e.del) continue; set.add(e.date.slice(0,7)); if(isEmi(e)) for(const p of emiPlan(e)) set.add(p.ym); } months=[...set].sort(); }
   const es=months.flatMap(csvMonth);
-  const q=v=>{ v=String(v??''); if(/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v="'"+v;   // stop spreadsheet formulas in notes
+  const q=v=>{ v=String(v??''); if(/^\s*[=+\-@\t\r＝＋－＠]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v="'"+v;   // stop spreadsheet formulas in notes
     return /[",\n]/.test(v)? '"'+v.replace(/"/g,'""')+'"' : v; };
   const sign=e=>(CAT[e.cat]?.income || e.cat==='borrowed')? -1 : 1;
   const note=e=>[e.inst?'EMI '+e.inst.k+'/'+e.inst.n:'', e.emiOrig?'Bought on EMI ('+sgd(e.emiOrig)+', counted in monthly instalments)':'', e.friend?e.friend:'', e.note||''].filter(Boolean).join(' · ');
@@ -2974,6 +2978,11 @@ function exportCSV(ym){
 /* ============ Profiles ============ */
 const AV_COLORS = ['#2a78d6','#1baf7a','#eb6834','#4a3aa7','#e34948','#008300','#c98500','#d55181'];
 const avatar = (p,lg) => `<span class="av${lg?' lg':''}">${esc((p.name||'?').trim().charAt(0).toUpperCase()||'?')}</span>`;
+/* After 5 wrong PINs, wait 30 s, then 60 s, 2 min… (kept on this device, so reloading doesn't reset it) */
+const PFKEY=id=>'pocketBudget.pinFail.'+id;
+function pinWait(id){ try{ const f=JSON.parse(localStorage.getItem(PFKEY(id))||'{}'); return Math.max(0, Math.ceil(((f.until||0)-Date.now())/1000)); }catch(e){ return 0; } }
+function pinFail(id){ try{ const f=JSON.parse(localStorage.getItem(PFKEY(id))||'{}'); f.n=(f.n||0)+1; if(f.n>=5) f.until=Date.now()+30000*Math.pow(2,Math.min(8,f.n-5)); localStorage.setItem(PFKEY(id),JSON.stringify(f)); }catch(e){} }
+function pinReset(id){ try{ localStorage.removeItem(PFKEY(id)); }catch(e){} }
 async function hashPin(pin, salt, kdf){
   if(kdf==='pbkdf2'){ const k=await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
     const bits=await crypto.subtle.deriveBits({name:'PBKDF2', hash:'SHA-256', salt:new TextEncoder().encode(salt), iterations:200000}, k, 256);
@@ -3076,7 +3085,12 @@ function askPin(p, blocking){
       if(k==='b'){ val=val.slice(0,-1); draw(); return; }
       if(val.length>=4) return;
       val+=k; draw();
-      if(val.length===4){ const h = await hashPin(val,p.salt,p.kdf); if(h===p.pin) finish(true); else { val=''; draw('Wrong PIN — try again'); } }
+      if(val.length===4){ const w=pinWait(p.id); if(w){ val=''; draw('Too many tries. Wait '+w+' s'); return; }
+        const h = await hashPin(val,p.salt,p.kdf);
+        if(h===p.pin){ pinReset(p.id);
+          if(p.kdf!=='pbkdf2'){ try{ const salt=uid()+uid(); p.pin=await hashPin(val,salt,'pbkdf2'); p.salt=salt; p.kdf='pbkdf2'; saveProfiles(); }catch(e){} }   // upgrade an old PIN hash
+          finish(true); }
+        else { pinFail(p.id); val=''; const w2=pinWait(p.id); draw(w2? 'Too many tries. Wait '+w2+' s' : 'Wrong PIN — try again'); } }
     };
     const kd = ev => { if(/^\d$/.test(ev.key)) key(ev.key); else if(ev.key==='Backspace') key('b'); else if(ev.key==='Escape' && !blocking) key('x'); };
     document.addEventListener('keydown', kd);

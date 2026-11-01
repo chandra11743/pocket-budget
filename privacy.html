@@ -25,10 +25,11 @@ p,li{color:var(--muted)}a{color:var(--accent)}
     <ul><li><b>On your device:</b> the expenses, budgets, categories and settings you enter, in the browser's storage for this site.</li>
     <li><b>In your Google Drive (only if you sign in):</b> one file with the same data, in a hidden app folder. It is used to back up your data and to sync your devices.</li></ul></div>
   <div class="card"><h2>Google sign-in</h2>
-    <p>Pocket Budget asks Google for one permission: <code>drive.appdata</code>. It lets the app create and read its own file in a hidden folder of your Drive. It does not let the app see, change or delete any of your other Drive files, your email or your contacts.</p>
+    <p>Pocket Budget asks Google for one permission: <code>drive.appdata</code>. It lets the app create and read its own file in a hidden folder of your Drive. It does not let the app see, change or delete any of your other Drive files or your contacts. To show which account you're signed in with, the app reads your Google account's email address; it stays on your device.</p>
     <p>The file is private to your Google account. Nobody else can open it, including the person who made or hosts Pocket Budget. The app talks to Google directly from your device; nothing passes through another server.</p>
     <p>The sign-in token is kept only in your browser and expires after about an hour.</p></div>
   <div class="card"><h2>Other connections</h2><p>When you record money sent home in another currency, the app looks up that day's exchange rate from a public exchange-rate service (Frankfurter or ExchangeRate-API). Only the two currency codes and the date are sent.</p></div>
+  <div class="card"><h2>Fonts</h2><p>The app loads its fonts from Google Fonts, so Google receives your device's IP address when the fonts are downloaded, like any website that uses Google Fonts. No app data is sent.</p></div>
   <div class="card"><h2>Removing your data</h2>
     <ul><li>Settings → Sync → More → <b>Delete my data from Google Drive</b> deletes the file from your Drive and signs you out.</li>
     <li>Settings → Data → <b>Erase … data on this device</b> deletes it from the device.</li>
