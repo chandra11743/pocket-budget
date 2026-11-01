@@ -954,7 +954,7 @@ function loadDB(){
       for(const [k,v] of Object.entries(d.rates||{})) if(/^\d{4}-\d{2}-\d{2}\|[A-Z]{6}$/.test(k) && typeof v==='number') db.rates[k]=v;
       db.settings=cleanSettings(d.settings)||db.settings;
       if(d.meta && typeof d.meta==='object') for(const k of ['lastCloud','lastManual','lastRate']) if(typeof d.meta[k]==='number' && isFinite(d.meta[k])) db.meta[k]=d.meta[k];
-      if(typeof d.meta.lastRatePair==='string' && /^[A-Z]{6}$/.test(d.meta.lastRatePair)) db.meta.lastRatePair=d.meta.lastRatePair;
+      if(d.meta && typeof d.meta.lastRatePair==='string' && /^[A-Z]{6}$/.test(d.meta.lastRatePair)) db.meta.lastRatePair=d.meta.lastRatePair;
       const lc=+localStorage.getItem(KEY+'.lastCloud')||0; if(lc>(db.meta.lastCloud||0)) db.meta.lastCloud=lc;
     }
     return db; } }catch(e){}
@@ -2179,7 +2179,7 @@ function renderSettings(){
   $('#dCsv').onclick=()=>exportCSV(S.ym); $('#dCsvAll').onclick=()=>exportCSV(null);
   $('#sExport').onclick=exportSyncFile; $('#sImport').onclick=()=>$('#fileIn').click();
   if($('#dSampleOff')) $('#dSampleOff').onclick=()=>{ removeSample(); toast('Sample data removed'); render(); };
-  confirmBtn($('#dClear'),'Tap again to erase '+p.name+"'s data",()=>{ const was=cloudOn(); stopSync(); if(was) gClear(); gVer=null; gFirst=true; cloudState='off'; DB=blankDB(); buildCats(); persist(); toast(p.name+"'s data on this device erased"+(was?'. Signed out of Google: your Drive copy is untouched (delete it in Settings → Sync if you want).':'')); render(); maybeWizard(); });
+  confirmBtn($('#dClear'),'Tap again to erase '+p.name+"'s data",()=>{ const was=cloudOn(); stopSync(); if(was){ try{ const g=gCfg(); if(g && g.token) fetch('https://oauth2.googleapis.com/revoke',{method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(g.token)}).catch(()=>{}); }catch(e){} gClear(); } gVer=null; gFirst=true; cloudState='off'; DB=blankDB(); buildCats(); persist(); toast(p.name+"'s data on this device erased"+(was?'. Signed out of Google: your Drive copy is untouched (delete it in Settings → Sync if you want).':'')); render(); maybeWizard(); });
   renderCloudStatus();
 }
 function applyTheme(){ const t=DB.settings.theme, r=document.documentElement; if(t==='light'||t==='dark') r.dataset.theme=t; else delete r.dataset.theme;
@@ -2741,7 +2741,7 @@ function syncFileName(){ return `pocket-budget-backup-${slug(curProfile().name)}
 /* ============ Sync: Sign in with Google → a hidden app folder in the person's OWN Google Drive ============
    Uses the drive.appdata permission only: the app can see its own file and nothing else in your Drive,
    and nobody else (including whoever made the app) can see it. No server: the phone talks to Google directly. */
-const APP_VERSION='v5';
+const APP_VERSION='v6';
 const GOOGLE_CLIENT_ID = '1012295719275-2nhecb6mkicb2bqt0dmmuj6t09aojkjd.apps.googleusercontent.com';   // OAuth client (type: Web application) whose authorised origin + redirect is this page
 const G_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const G_API='https://www.googleapis.com/drive/v3', G_UP='https://www.googleapis.com/upload/drive/v3';
@@ -2781,7 +2781,7 @@ function gTakeToken(){
   if(!/^[A-Za-z0-9._~+\/=-]{20,4096}$/.test(tok)) return {bad:true};
   if(!sc.includes('drive.appdata')) return {error:'no_drive'};
   const c=gCfg()||{}; let last=''; try{ last=localStorage.getItem('pocketBudget.lastEmail.'+PROFILES.current)||''; }catch(e){}
-  gSave({...c, prevEmail:c.email||last||'', email:c.email||'', token:tok, exp:Date.now()+exp*1000, check:!sv.silent}); try{ localStorage.removeItem(GSILENT); }catch(e){}
+  gSave({...c, prevEmail:c.email||last||'', email:c.email||'', token:tok, exp:Date.now()+exp*1000, check:sv.silent?'silent':true}); try{ localStorage.removeItem(GSILENT); }catch(e){}
   return {ok:true, restore:!!sv.restore, first:!c.email && !last};
 }
 async function gFetch(url, opt={}, cx){
@@ -2810,7 +2810,7 @@ async function gWho(){ try{ const j=await (await gFetch(G_API+'/about?fields=use
 async function gConfirmAccount(){
   const c=gCfg(); if(!c || !c.check) return true;
   const who=await gWho(); const x=gCfg(); if(!x) return false;
-  if(!who){ return !x.prevEmail; }   // couldn't check: only carry on if there was no earlier account
+  if(!who){ return c.check==='silent' || !x.prevEmail; }   // couldn't check: only carry on if there was no earlier account
   const prev=(x.prevEmail||'').toLowerCase();
   if(prev && prev!==who.toLowerCase()){
     gSave({...x, fileId:null, hold:true, check:false}); gVer=null; gFirst=true;
@@ -3043,7 +3043,7 @@ function editProfile(id){
   if($('#pNoPin')) $('#pNoPin').onclick=()=>{ delete p.pin; delete p.salt; delete p.kdf; saveProfiles(); toast('PIN removed'); profileSheet(); };
   if($('#pDel')) confirmBtn($('#pDel'),`Tap again to delete ${p.name} and all their data here`,async()=>{
     try{ const g=JSON.parse(localStorage.getItem(gKey(p.id))||'null'); if(g && g.token) fetch('https://oauth2.googleapis.com/revoke',{method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(g.token)}).catch(()=>{}); }catch(e){}
-    try{ localStorage.removeItem(keyFor(p.id)); localStorage.removeItem(gKey(p.id)); }catch(e){}
+    try{ localStorage.removeItem(keyFor(p.id)); localStorage.removeItem(gKey(p.id)); localStorage.removeItem(keyFor(p.id)+'.lastCloud'); localStorage.removeItem('pocketBudget.lastEmail.'+p.id); }catch(e){}
     await idb.del(syncKeyFor(p.id));
     if(p.id===PROFILES.current) stopSync();
     PROFILES.list = PROFILES.list.filter(x=>x.id!==p.id);
@@ -3172,6 +3172,7 @@ let _rs; window.addEventListener('resize',()=>{ clearTimeout(_rs); _rs=setTimeou
 window.addEventListener('storage',ev=>{ if(ev.key===KEY){ DB=loadDB(); buildCats(); render(); } else if(ev.key===PKEY){ const P=loadProfiles(); if(P.list.some(p=>p.id===PROFILES.current)) P.current=PROFILES.current; PROFILES=P; renderProfileBtn(); } });   // each tab keeps its own profile
 const G_RET = gTakeToken();   // back from Google sign-in? (runs before anything touches history)
 try{ if(localStorage.getItem('pocketBudget.hideOnOpen')!=='0') localStorage.setItem('pocketBudget.showBal','0'); }catch(e){}
+try{ if(curProfile().pin) document.body.classList.add('locked'); }catch(e){}
 applyTheme();
 renderProfileBtn();
 try{ cleanupFunds(); ensureOpening(); }catch(e){}
